@@ -132,9 +132,7 @@ if os.environ.get("DATABASE_URL"):
     # 👉 Producción (Render)
     DATABASES = {
         "default": dj_database_url.parse(
-            os.environ.get("DATABASE_URL"),
-            conn_max_age=600,
-            ssl_require=True
+            os.environ.get("DATABASE_URL"), conn_max_age=600, ssl_require=True
         )
     }
 else:
