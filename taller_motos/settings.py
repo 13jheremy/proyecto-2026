@@ -232,6 +232,10 @@ CORS_ALLOWED_METHODS = [
     "PUT",
 ]
 
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"https://.*\.vercel\.app",
+]
+
 # =========================
 # REST FRAMEWORK CONFIGURATION
 # =========================
