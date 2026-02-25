@@ -125,16 +125,30 @@ TEMPLATES = [
 # =========================
 # DATABASE CONFIGURATION
 # =========================
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "taller_db",
-        "USER": "postgres",
-        "PASSWORD": "123456",
-        "HOST": "localhost",
-        "PORT": "5432",
+import os
+import dj_database_url
+
+if os.environ.get("DATABASE_URL"):
+    # 👉 Producción (Render)
+    DATABASES = {
+        "default": dj_database_url.parse(
+            os.environ.get("DATABASE_URL"),
+            conn_max_age=600,
+            ssl_require=True
+        )
     }
-}
+else:
+    # 👉 Local
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": "taller_db",
+            "USER": "postgres",
+            "PASSWORD": "123456",
+            "HOST": "localhost",
+            "PORT": "5432",
+        }
+    }
 
 # =========================
 # PASSWORD VALIDATORS
