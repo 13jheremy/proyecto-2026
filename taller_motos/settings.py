@@ -207,7 +207,7 @@ if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
     CORS_ALLOWED_ORIGINS = config(
-        "CORS_ALLOWED_ORIGINS", default="http://localhost:3000"
+        "CORS_ALLOWED_ORIGINS", default="https://proyecto-2026-ts4b.onrender.com"
     ).split(",")
 
 CORS_ALLOWED_HEADERS = [
