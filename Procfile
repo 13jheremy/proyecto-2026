@@ -1,0 +1,1 @@
+web: gunicorn taller_motos.wsgi
