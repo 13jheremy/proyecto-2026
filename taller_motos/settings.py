@@ -207,7 +207,8 @@ if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
     CORS_ALLOWED_ORIGINS = config(
-        "CORS_ALLOWED_ORIGINS", default="https://proyecto-2026-ts4b.onrender.com"
+        "CORS_ALLOWED_ORIGINS",
+        default="https://proyecto-2026-ts4b.onrender.com,https://frontend-proyecto-2026.vercel.app",  # Añade tu URL de Vercel aquí
     ).split(",")
 
 CORS_ALLOWED_HEADERS = [
