@@ -912,6 +912,7 @@ class ProductoPublicoSerializer(BaseModelSerializer):
 
     categoria_nombre = serializers.CharField(source="categoria.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
+    stock_actual = serializers.SerializerMethodField()
 
     class Meta:
         model = Producto
@@ -923,12 +924,20 @@ class ProductoPublicoSerializer(BaseModelSerializer):
             "precio_venta",
             "destacado",
             "imagen_url",
+            "stock_actual",
         ]
 
     def get_imagen_url(self, obj):
         if obj.imagen:
             return obj.imagen.url
         return None
+
+    def get_stock_actual(self, obj):
+        """Obtener stock actual del inventario"""
+        try:
+            return obj.inventario.stock_actual
+        except:
+            return 0
 
 
 # =======================================
@@ -1620,11 +1629,11 @@ class RecordatorioMantenimientoSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         # Extraer IDs y mapear a campos de modelo
-        moto_id = validated_data.pop('moto_id')
-        categoria_servicio_id = validated_data.pop('categoria_servicio_id')
+        moto_id = validated_data.pop("moto_id")
+        categoria_servicio_id = validated_data.pop("categoria_servicio_id")
 
         # Excluir campos que no pertenecen al modelo
-        validated_data.pop('usuario', None)  # Remover usuario si existe
+        validated_data.pop("usuario", None)  # Remover usuario si existe
 
         # Obtener instancias
         moto = Moto.objects.get(id=moto_id)
@@ -1632,23 +1641,23 @@ class RecordatorioMantenimientoSerializer(serializers.ModelSerializer):
 
         # Crear recordatorio
         recordatorio = RecordatorioMantenimiento.objects.create(
-            moto=moto,
-            categoria_servicio=categoria_servicio,
-            **validated_data
+            moto=moto, categoria_servicio=categoria_servicio, **validated_data
         )
 
         return recordatorio
 
     def update(self, instance, validated_data):
         # Extraer IDs si están presentes
-        moto_id = validated_data.pop('moto_id', None)
-        categoria_servicio_id = validated_data.pop('categoria_servicio_id', None)
+        moto_id = validated_data.pop("moto_id", None)
+        categoria_servicio_id = validated_data.pop("categoria_servicio_id", None)
 
         # Actualizar relaciones si se proporcionaron IDs
         if moto_id is not None:
             instance.moto = Moto.objects.get(id=moto_id)
         if categoria_servicio_id is not None:
-            instance.categoria_servicio = CategoriaServicio.objects.get(id=categoria_servicio_id)
+            instance.categoria_servicio = CategoriaServicio.objects.get(
+                id=categoria_servicio_id
+            )
 
         # Actualizar otros campos
         for attr, value in validated_data.items():
