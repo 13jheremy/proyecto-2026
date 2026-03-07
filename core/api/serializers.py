@@ -984,8 +984,14 @@ class MotoSerializer(BaseModelSerializer):
     """Serializer para Motos"""
 
     propietario = PersonaSerializer(read_only=True)
+
+    propietario_id = serializers.PrimaryKeyRelatedField(
+        queryset=Persona.objects.all(), source="propietario", write_only=True
+    )
+
     propietario_nombre = serializers.SerializerMethodField(read_only=True)
     propietario_cedula = serializers.SerializerMethodField(read_only=True)
+
     registrado_por_nombre = serializers.CharField(
         source="registrado_por.username", read_only=True
     )
@@ -995,6 +1001,7 @@ class MotoSerializer(BaseModelSerializer):
         fields = [
             "id",
             "propietario",
+            "propietario_id",
             "propietario_nombre",
             "propietario_cedula",
             "marca",
