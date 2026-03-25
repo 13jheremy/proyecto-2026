@@ -4812,7 +4812,7 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
         if self.action in ["list", "retrieve"]:
             return [permissions.IsAuthenticated()]
         elif self.action in ["create", "destroy", "proximos", "por_km"]:
-            return [IsTecnico() | IsEmpleado() | IsAdministrador()]
+            return [IsTecnico() | IsEmpleado() | IsAdministrador() | IsCliente()]
         return [IsTecnico() | IsEmpleado() | IsAdministrador()]
 
     @action(detail=False, methods=["get"])
@@ -4833,32 +4833,40 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
         # Filtrar por cliente si es un cliente (no administrador)
         # Obtener los IDs de las motos del cliente
         from core.models import Moto
-        
+
         queryset = self.get_queryset()
-        
+
         # Si es cliente, filtrar solo sus recordatorios
-        if IsCliente().has_permission(request, self) and not IsAdministrador().has_permission(request, self):
-            if hasattr(request.user, "persona_asociada") and request.user.persona_asociada:
-                queryset = queryset.filter(moto__propietario=request.user.persona_asociada)
+        if IsCliente().has_permission(
+            request, self
+        ) and not IsAdministrador().has_permission(request, self):
+            if (
+                hasattr(request.user, "persona_asociada")
+                and request.user.persona_asociada
+            ):
+                queryset = queryset.filter(
+                    moto__propietario=request.user.persona_asociada
+                )
             else:
                 queryset = queryset.none()
-        
+
         # Filtrar por fecha y activo
         from datetime import timedelta
+
         fecha_limite = timezone.now().date() + timedelta(days=dias)
-        
+
         queryset = queryset.filter(
             activo=True,
             fecha_programada__lte=fecha_limite,
         )
-        
+
         # Si hay tipo, filtrar por tipo
         if tipo:
             queryset = queryset.filter(tipo=tipo)
-        
+
         # Obtener resultados
         queryset = queryset.select_related("moto", "categoria_servicio")[:limite]
-        
+
         resultados = []
         for r in queryset:
             info = r.proximo(dias)
@@ -4867,7 +4875,9 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
                     "id": r.id,
                     "moto": r.moto.placa,
                     "moto_id": r.moto.id,
-                    "categoria": r.categoria_servicio.nombre if r.categoria_servicio else None,
+                    "categoria": (
+                        r.categoria_servicio.nombre if r.categoria_servicio else None
+                    ),
                     "tipo": r.tipo,
                     "fecha_programada": r.fecha_programada,
                     "km_proximo": r.km_proximo,
