@@ -13,7 +13,11 @@ def asignar_rol_superusuario(sender, instance, created, **kwargs):
             rol_admin, _ = Rol.objects.get_or_create(nombre="Administrador")
             UsuarioRol.objects.get_or_create(usuario=instance, rol=rol_admin)
         except Exception as e:
-            print(f"Error al asignar rol de administrador: {e}")
+            import logging
+
+            logging.getLogger(__name__).error(
+                f"Error al asignar rol de administrador: {e}"
+            )
 
 
 # ===== 2) Crear datos iniciales =====
@@ -29,6 +33,7 @@ def crear_datos_iniciales(sender, **kwargs):
     if sender.name == "servicios":
         categorias_servicio = [
             "Cambio de aceite y filtros",
+            "Mantenimiento general",
             "Revisión general de la moto",
             "Arreglo del motor",
             "Reparación de sistema eléctrico (luces, batería, encendido)",
@@ -66,50 +71,92 @@ def crear_datos_iniciales(sender, **kwargs):
 @receiver(post_save, sender=Mantenimiento)
 def crear_recordatorio_desde_mantenimiento(sender, instance, created, **kwargs):
     """
-    Crea recordatorios automáticos para próximos mantenimientos o cambios de aceite
-    según los servicios realizados en este mantenimiento.
+    Delegate la creación de recordatorios al método generar_recordatorios()
+    de DetalleMantenimiento, que ahora maneja toda la lógica correctamente:
+    - Cambio de aceite y filtros: crea recordatorios por KM (usando km_proximo_cambio del usuario)
+      y por fecha desde fecha_entrega
+    - Mantenimiento general: crea recordatorio por fecha (60 días / 2 meses desde fecha_entrega)
+
+    Solo se ejecutan cuando el mantenimiento está completado.
     """
-    if created:
-        for detalle in instance.detalles.all():
-            categoria = detalle.servicio.categoria_servicio
+    # Solo crear recordatorios cuando el mantenimiento está completado
+    if not created or instance.estado != "completado":
+        return
 
-            # Definir intervalos según categoría
-            if categoria.nombre.lower() == "cambio de aceite":
-                dias_para_proximo = 90  # ejemplo: cada 90 días
-            else:
-                dias_para_proximo = 180  # ejemplo: cada 6 meses para otros servicios
+    import logging
 
-            fecha_proximo = instance.fecha_ingreso.date() + timedelta(
-                days=dias_para_proximo
+    logger = logging.getLogger(__name__)
+
+    # Delegar a cada detalle que llame a su propio método generar_recordatorios()
+    for detalle in instance.detalles.all():
+        try:
+            detalle.generar_recordatorios()
+            logger.info(f"Recordatorios generados para detalle {detalle.id}")
+        except Exception as e:
+            logger.error(
+                f"Error al generar recordatorios para detalle {detalle.id}: {str(e)}"
             )
-
-            # Crear recordatorio
-            RecordatorioMantenimiento.objects.create(
-                moto=instance.moto,
-                categoria_servicio=categoria,
-                fecha_programada=fecha_proximo,
-            )
+            continue  # Continuar con otros detalles si uno falla
 
 
 @receiver(post_save, sender=Moto)
 def crear_recordatorio_inicial_moto(sender, instance, created, **kwargs):
     """
-    Opcional: al registrar una moto nueva, se pueden crear recordatorios iniciales
-    para servicios periódicos predefinidos (ej: cambio de aceite).
+    Al registrar una moto nueva, crea recordatorios iniciales para servicios
+    periódicos predefinidos: cambio de aceite y filtros y mantenimiento general.
     """
     if created:
-        # Ejemplo: buscar categoría "Cambio de aceite"
         from ..models import CategoriaServicio, RecordatorioMantenimiento
+        import logging
 
-        try:
-            categoria_aceite = CategoriaServicio.objects.get(
-                nombre__iexact="cambio de aceite"
-            )
-            fecha_proximo = timezone.now().date() + timedelta(days=90)
-            RecordatorioMantenimiento.objects.create(
-                moto=instance,
-                categoria_servicio=categoria_aceite,
-                fecha_programada=fecha_proximo,
-            )
-        except CategoriaServicio.DoesNotExist:
-            pass
+        logger = logging.getLogger(__name__)
+
+        # Categorías para crear recordatorios iniciales
+        categorias_iniciales = [
+            ("Cambio de aceite y filtros", 90),  # 3 meses
+            ("Mantenimiento general", 60),  # 2 meses
+        ]
+
+        for nombre_categoria, dias in categorias_iniciales:
+            try:
+                categoria = CategoriaServicio.objects.get(
+                    nombre__iexact=nombre_categoria
+                )
+                fecha_proximo = timezone.now().date() + timedelta(days=dias)
+
+                # ✅ VERIFICAR SI YA EXISTE recordatorio activo para evitar duplicados
+                existente = RecordatorioMantenimiento.objects.filter(
+                    moto=instance,
+                    categoria_servicio=categoria,
+                    tipo="fecha",
+                    activo=True,
+                ).first()
+
+                if existente:
+                    # Actualizar fecha existente
+                    existente.fecha_programada = fecha_proximo
+                    existente.enviado = False
+                    existente.save()
+                    logger.info(
+                        f"Recordatorio inicial actualizado para moto {instance.placa} - {categoria.nombre}"
+                    )
+                else:
+                    # Crear nuevo recordatorio
+                    RecordatorioMantenimiento.objects.create(
+                        moto=instance,
+                        categoria_servicio=categoria,
+                        fecha_programada=fecha_proximo,
+                        tipo="fecha",
+                    )
+                    logger.info(
+                        f"Recordatorio inicial creado para moto {instance.placa} - {categoria.nombre}"
+                    )
+
+            except CategoriaServicio.DoesNotExist:
+                logger.warning(
+                    f"No se encontró categoría '{nombre_categoria}' para crear recordatorio inicial de moto {instance.placa}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error al crear recordatorio inicial para moto {instance.placa}: {str(e)}"
+                )

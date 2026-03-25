@@ -18,7 +18,7 @@ User = get_user_model()
 class PasswordResetRequestView(APIView):
     """
     Vista para solicitar recuperación de contraseña.
-    Solo para clientes - no afecta funcionalidad de administrador.
+    Disponible para todos los usuarios del sistema.
     """
 
     permission_classes = [AllowAny]
@@ -35,16 +35,10 @@ class PasswordResetRequestView(APIView):
         try:
             user = User.objects.get(correo_electronico=email)
 
-            # Verificar que el usuario tenga rol de cliente usando el modelo UsuarioRol
-            user_roles = [
-                usuario_rol.rol.nombre.lower()
-                for usuario_rol in user.roles.filter(activo=True)
-            ]
-            if "cliente" not in user_roles:
+            # Verificar que el usuario esté activo
+            if not user.is_active:
                 return Response(
-                    {
-                        "error": "La recuperación de contraseña solo está disponible para clientes"
-                    },
+                    {"error": "Cuenta inactiva. Contacta al administrador."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
@@ -109,7 +103,7 @@ Equipo de JIC Taller y Repuestos de Motos
 class PasswordResetConfirmView(APIView):
     """
     Vista para confirmar y cambiar la contraseña usando el token.
-    Solo para clientes - no afecta funcionalidad de administrador.
+    Disponible para todos los usuarios del sistema.
     """
 
     permission_classes = [AllowAny]
@@ -137,14 +131,11 @@ class PasswordResetConfirmView(APIView):
             uid_decoded = urlsafe_base64_decode(uid).decode()
             user = User.objects.get(pk=uid_decoded)
 
-            # Verificar que el usuario tenga rol de cliente usando el modelo UsuarioRol
-            user_roles = [
-                usuario_rol.rol.nombre.lower()
-                for usuario_rol in user.roles.filter(activo=True)
-            ]
-            if "cliente" not in user_roles:
+            # Verificar que el usuario esté activo
+            if not user.is_active:
                 return Response(
-                    {"error": "Token inválido"}, status=status.HTTP_400_BAD_REQUEST
+                    {"error": "Cuenta inactiva. Contacta al administrador."},
+                    status=status.HTTP_403_FORBIDDEN,
                 )
 
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):

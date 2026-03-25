@@ -44,8 +44,8 @@ def notificar_recordatorios(dias_antes=7):
                     },
                 )
             except Exception as e:
-                # Aquí puedes registrar el error en logs sin detener la tarea
-                print(f"Error enviando notificación a token {token}: {e}")
+                # Registrar el error en logs sin detener la tarea
+                logger.error(f"Error enviando notificación a token {token}: {e}")
 
         # Marcar como enviado solo si al menos un token fue procesado
         r.enviado = True

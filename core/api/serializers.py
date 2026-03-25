@@ -84,6 +84,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     username_field = "correo_electronico"
 
     def validate(self, attrs):
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         correo = attrs.get("correo_electronico", "").lower().strip()
         password = attrs.get("password")
 
@@ -92,10 +96,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 "Correo electrónico y contraseña son requeridos"
             )
 
-        user = authenticate(correo_electronico=correo, password=password)
+        # First check if user exists
+        try:
+            user = Usuario.objects.get(correo_electronico=correo)
+        except Usuario.DoesNotExist:
+            raise serializers.ValidationError("Usuario no existe")
 
-        if not user:
-            raise serializers.ValidationError("Usuario o contraseña incorrectos")
+        # Then check password
+        password_check = user.check_password(password)
+
+        if not password_check:
+            raise serializers.ValidationError("Credenciales erroneas")
 
         if not user.is_active:
             raise serializers.ValidationError("Usuario inactivo")
@@ -121,6 +132,10 @@ class MobileTokenObtainPairSerializer(TokenObtainPairSerializer):
     username_field = "correo_electronico"
 
     def validate(self, attrs):
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         correo = attrs.get("correo_electronico", "").lower().strip()
         password = attrs.get("password")
 
@@ -129,10 +144,17 @@ class MobileTokenObtainPairSerializer(TokenObtainPairSerializer):
                 "Correo electrónico y contraseña son requeridos"
             )
 
-        user = authenticate(correo_electronico=correo, password=password)
+        # First check if user exists
+        try:
+            user = Usuario.objects.get(correo_electronico=correo)
+        except Usuario.DoesNotExist:
+            raise serializers.ValidationError("Usuario no existe")
 
-        if not user:
-            raise serializers.ValidationError("Usuario o contraseña incorrectos")
+        # Then check password
+        password_check = user.check_password(password)
+
+        if not password_check:
+            raise serializers.ValidationError("Credenciales erroneas")
 
         if not user.is_active:
             raise serializers.ValidationError("Usuario inactivo")
@@ -359,6 +381,10 @@ class UsuarioSerializer(BaseModelSerializer):
     roles = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False)
     tiene_persona = serializers.BooleanField(read_only=True)
+    # Campos de auditoría
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Usuario
@@ -375,7 +401,56 @@ class UsuarioSerializer(BaseModelSerializer):
             "tiene_persona",
             "last_login",
             "date_joined",
+            # Campos de auditoría
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
+            "fecha_registro",
+            "fecha_actualizacion",
+            "fecha_eliminacion",
         ]
+
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            # Obtener nombre completo si tiene persona asociada
+            nombre_completo = None
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                nombre_completo = user.persona_asociada.nombre_completo
+            return {
+                "id": user.id,
+                "nombre": nombre_completo or user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            # Obtener nombre completo si tiene persona asociada
+            nombre_completo = None
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                nombre_completo = user.persona_asociada.nombre_completo
+            return {
+                "id": user.id,
+                "nombre": nombre_completo or user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            # Obtener nombre completo si tiene persona asociada
+            nombre_completo = None
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                nombre_completo = user.persona_asociada.nombre_completo
+            return {
+                "id": user.id,
+                "nombre": nombre_completo or user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
 
     def get_roles(self, obj):
         return [
@@ -487,6 +562,9 @@ class UsuarioPersonaCompleteSerializer(serializers.ModelSerializer):
         read_only=True
     )  # Solo para leer
 
+    # Campo para vincular a una persona existente
+    persona_id = serializers.IntegerField(write_only=True, required=False)
+
     # Campos individuales para escribir datos de persona
     persona_nombre = serializers.CharField(write_only=True, required=False)
     persona_apellido = serializers.CharField(write_only=True, required=False)
@@ -515,6 +593,7 @@ class UsuarioPersonaCompleteSerializer(serializers.ModelSerializer):
             "is_active",
             "is_staff",
             "persona_asociada",  # Para leer (SerializerMethodField)
+            "persona_id",  # Para vincular a persona existente
             # Campos individuales para escribir
             "persona_nombre",
             "persona_apellido",
@@ -567,6 +646,38 @@ class UsuarioPersonaCompleteSerializer(serializers.ModelSerializer):
         logger.info("✓ Cédula válida")
         return value
 
+    def validate_username(self, value):
+        """Validar unicidad del username"""
+        if not value:
+            return value
+
+        # Si es actualización y el username no cambió, permitir
+        if self.instance and self.instance.username == value:
+            return value
+
+        if Usuario.objects.filter(username=value).exists():
+            raise serializers.ValidationError(
+                "Ya existe un usuario con este nombre de usuario."
+            )
+
+        return value
+
+    def validate_correo_electronico(self, value):
+        """Validar unicidad del correo electrónico"""
+        if not value:
+            return value
+
+        # Si es actualización y el correo no cambió, permitir
+        if self.instance and self.instance.correo_electronico == value:
+            return value
+
+        if Usuario.objects.filter(correo_electronico=value).exists():
+            raise serializers.ValidationError(
+                "Ya existe un usuario con este correo electrónico."
+            )
+
+        return value
+
     def create(self, validated_data):
         logger.info("=== INICIO create ===")
 
@@ -583,6 +694,9 @@ class UsuarioPersonaCompleteSerializer(serializers.ModelSerializer):
                 persona_field = field.replace("persona_", "")
                 persona_data[persona_field] = validated_data.pop(field)
 
+        # Extraer persona_id para vincular a persona existente
+        persona_id = validated_data.pop("persona_id", None)
+
         password = validated_data.pop("password")
         roles_ids = validated_data.pop("roles", [])
 
@@ -591,8 +705,17 @@ class UsuarioPersonaCompleteSerializer(serializers.ModelSerializer):
         usuario.set_password(password)
         usuario.save()
 
-        # Crear persona si hay datos
-        if persona_data:
+        # Manejar persona asociada
+        if persona_id:
+            # Vincular a persona existente
+            try:
+                persona = Persona.objects.get(id=persona_id)
+                usuario.asociar_persona(persona)
+                logger.info(f"✓ Persona ID {persona_id} vinculada al usuario")
+            except Persona.DoesNotExist:
+                logger.warning(f"Persona ID {persona_id} no encontrada")
+        elif persona_data:
+            # Crear nueva persona si hay datos
             persona = Persona.objects.create(**persona_data)
             usuario.asociar_persona(persona)
             logger.info("✓ Persona creada y asociada")
@@ -732,6 +855,11 @@ class CategoriaSerializer(BaseModelSerializer):
 
     productos_count = serializers.SerializerMethodField()
 
+    # Campos de auditoría (Trazabilidad)
+    creado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    actualizado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    eliminado_por_nombre = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Categoria
         fields = [
@@ -739,19 +867,55 @@ class CategoriaSerializer(BaseModelSerializer):
             "nombre",
             "descripcion",
             "activo",
+            "eliminado",
             "productos_count",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "creado_por_nombre",
+            "actualizado_por",
+            "actualizado_por_nombre",
+            "eliminado_por",
+            "eliminado_por_nombre",
         ]
 
     def get_productos_count(self, obj):
         return obj.producto_set.filter(activo=True, eliminado=False).count()
+
+    def get_creado_por_nombre(self, obj):
+        if obj.creado_por:
+            if hasattr(obj.creado_por, "persona") and obj.creado_por.persona:
+                return (
+                    f"{obj.creado_por.persona.nombre} {obj.creado_por.persona.apellido}"
+                )
+            return obj.creado_por.username
+        return None
+
+    def get_actualizado_por_nombre(self, obj):
+        if obj.actualizado_por:
+            if hasattr(obj.actualizado_por, "persona") and obj.actualizado_por.persona:
+                return f"{obj.actualizado_por.persona.nombre} {obj.actualizado_por.persona.apellido}"
+            return obj.actualizado_por.username
+        return None
+
+    def get_eliminado_por_nombre(self, obj):
+        if obj.eliminado_por:
+            if hasattr(obj.eliminado_por, "persona") and obj.eliminado_por.persona:
+                return f"{obj.eliminado_por.persona.nombre} {obj.eliminado_por.persona.apellido}"
+            return obj.eliminado_por.username
+        return None
 
 
 class CategoriaServicioSerializer(BaseModelSerializer):
     """Serializer para Categorías de Servicios"""
 
     servicios_count = serializers.SerializerMethodField()
+
+    # Campos de auditoría (Trazabilidad)
+    creado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    actualizado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    eliminado_por_nombre = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = CategoriaServicio
@@ -760,13 +924,44 @@ class CategoriaServicioSerializer(BaseModelSerializer):
             "nombre",
             "descripcion",
             "activo",
+            "eliminado",
             "servicios_count",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "creado_por_nombre",
+            "actualizado_por",
+            "actualizado_por_nombre",
+            "eliminado_por",
+            "eliminado_por_nombre",
         ]
 
     def get_servicios_count(self, obj):
         return obj.servicio_set.filter(activo=True, eliminado=False).count()
+
+    def get_creado_por_nombre(self, obj):
+        if obj.creado_por:
+            if hasattr(obj.creado_por, "persona") and obj.creado_por.persona:
+                return (
+                    f"{obj.creado_por.persona.nombre} {obj.creado_por.persona.apellido}"
+                )
+            return obj.creado_por.username
+        return None
+
+    def get_actualizado_por_nombre(self, obj):
+        if obj.actualizado_por:
+            if hasattr(obj.actualizado_por, "persona") and obj.actualizado_por.persona:
+                return f"{obj.actualizado_por.persona.nombre} {obj.actualizado_por.persona.apellido}"
+            return obj.actualizado_por.username
+        return None
+
+    def get_eliminado_por_nombre(self, obj):
+        if obj.eliminado_por:
+            if hasattr(obj.eliminado_por, "persona") and obj.eliminado_por.persona:
+                return f"{obj.eliminado_por.persona.nombre} {obj.eliminado_por.persona.apellido}"
+            return obj.eliminado_por.username
+        return None
 
 
 # =======================================
@@ -776,6 +971,11 @@ class ProveedorSerializer(BaseModelSerializer):
     """Serializer para Proveedores"""
 
     productos_count = serializers.SerializerMethodField()
+
+    # Campos de auditoría (Trazabilidad)
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Proveedor
@@ -792,6 +992,10 @@ class ProveedorSerializer(BaseModelSerializer):
             "productos_count",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
         ]
 
     def get_productos_count(self, obj):
@@ -809,6 +1013,54 @@ class ProveedorSerializer(BaseModelSerializer):
             raise serializers.ValidationError("Ya existe un proveedor con este NIT")
         return value
 
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "username": user.username,
+                    "nombre_completo": user.persona_asociada.nombre_completo,
+                }
+            return {
+                "id": user.id,
+                "username": user.username,
+                "nombre_completo": user.username,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "username": user.username,
+                    "nombre_completo": user.persona_asociada.nombre_completo,
+                }
+            return {
+                "id": user.id,
+                "username": user.username,
+                "nombre_completo": user.username,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "username": user.username,
+                    "nombre_completo": user.persona_asociada.nombre_completo,
+                }
+            return {
+                "id": user.id,
+                "username": user.username,
+                "nombre_completo": user.username,
+            }
+        return None
+
 
 # =======================================
 # PRODUCTO SERIALIZERS
@@ -820,16 +1072,23 @@ class ProductoSerializer(BaseModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
 
+    # Campos de auditoría
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
+
     # Campos para inventario inicial (solo en creación)
     stock_inicial = serializers.IntegerField(
         write_only=True, required=False, default=0, min_value=0
     )
+
+    # Ahora stock_minimo es un campo del modelo, pero mantenemos para compatibilidad
     stock_minimo = serializers.IntegerField(
         write_only=True, required=False, default=0, min_value=0
     )
 
     # Campos de lectura para mostrar información del inventario
-    stock_actual = serializers.SerializerMethodField(read_only=True)
+    inventario_stock = serializers.SerializerMethodField(read_only=True)
     inventario_stock_minimo = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -851,30 +1110,82 @@ class ProductoSerializer(BaseModelSerializer):
             "imagen_url",
             "stock_inicial",
             "stock_minimo",
-            "stock_actual",
+            "inventario_stock",
             "inventario_stock_minimo",
             "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
         ]
+
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
 
     def get_imagen_url(self, obj):
         if obj.imagen:
             return obj.imagen.url
         return None
 
-    def get_stock_actual(self, obj):
+    def get_inventario_stock(self, obj):
         """Obtener stock actual del inventario"""
         try:
             return obj.inventario.stock_actual
-        except:
+        except Inventario.DoesNotExist:
             return 0
 
     def get_inventario_stock_minimo(self, obj):
         """Obtener stock mínimo del inventario"""
         try:
             return obj.inventario.stock_minimo
-        except:
+        except Inventario.DoesNotExist:
             return 0
 
     def validate_codigo(self, value):
@@ -910,6 +1221,7 @@ class ProductoSerializer(BaseModelSerializer):
 class ProductoPublicoSerializer(BaseModelSerializer):
     """Serializer público para Productos (catálogo)"""
 
+    categoria = serializers.PrimaryKeyRelatedField(read_only=True)
     categoria_nombre = serializers.CharField(source="categoria.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
     stock_actual = serializers.SerializerMethodField()
@@ -920,6 +1232,7 @@ class ProductoPublicoSerializer(BaseModelSerializer):
             "id",
             "nombre",
             "descripcion",
+            "categoria",
             "categoria_nombre",
             "precio_venta",
             "destacado",
@@ -936,7 +1249,7 @@ class ProductoPublicoSerializer(BaseModelSerializer):
         """Obtener stock actual del inventario"""
         try:
             return obj.inventario.stock_actual
-        except:
+        except Inventario.DoesNotExist:
             return 0
 
 
@@ -949,6 +1262,11 @@ class ServicioSerializer(BaseModelSerializer):
     categoria_servicio_nombre = serializers.CharField(
         source="categoria_servicio.nombre", read_only=True
     )
+
+    # Campos de auditoría
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Servicio
@@ -964,7 +1282,59 @@ class ServicioSerializer(BaseModelSerializer):
             "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
         ]
+
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
 
     def validate_precio(self, value):
         if value <= 0:
@@ -996,6 +1366,34 @@ class MotoSerializer(BaseModelSerializer):
         source="registrado_por.username", read_only=True
     )
 
+    # Campos de auditoría
+    creado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    actualizado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    eliminado_por_nombre = serializers.SerializerMethodField(read_only=True)
+
+    def get_creado_por_nombre(self, obj):
+        if obj.creado_por:
+            if hasattr(obj.creado_por, "persona") and obj.creado_por.persona:
+                return (
+                    f"{obj.creado_por.persona.nombre} {obj.creado_por.persona.apellido}"
+                )
+            return obj.creado_por.username
+        return None
+
+    def get_actualizado_por_nombre(self, obj):
+        if obj.actualizado_por:
+            if hasattr(obj.actualizado_por, "persona") and obj.actualizado_por.persona:
+                return f"{obj.actualizado_por.persona.nombre} {obj.actualizado_por.persona.apellido}"
+            return obj.actualizado_por.username
+        return None
+
+    def get_eliminado_por_nombre(self, obj):
+        if obj.eliminado_por:
+            if hasattr(obj.eliminado_por, "persona") and obj.eliminado_por.persona:
+                return f"{obj.eliminado_por.persona.nombre} {obj.eliminado_por.persona.apellido}"
+            return obj.eliminado_por.username
+        return None
+
     class Meta:
         model = Moto
         fields = [
@@ -1019,8 +1417,27 @@ class MotoSerializer(BaseModelSerializer):
             "registrado_por_nombre",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "creado_por_nombre",
+            "actualizado_por",
+            "actualizado_por_nombre",
+            "eliminado_por",
+            "eliminado_por_nombre",
         ]
         extra_kwargs = {"propietario": {"required": False}}
+
+    def to_internal_value(self, data):
+        """Debug: mostrar datos recibidos en el serializer"""
+        logger = logging.getLogger(__name__)
+        logger.info(f"DEBUG MOTO SERIALIZER: data recibida = {data}")
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        """Debug: mostrar datos validados"""
+        logger = logging.getLogger(__name__)
+        logger.info(f"DEBUG MOTO SERIALIZER: attrs validados = {attrs}")
+        return super().validate(attrs)
 
     def validate_placa(self, value):
         """Validar unicidad de placa"""
@@ -1078,9 +1495,15 @@ class MotoSerializer(BaseModelSerializer):
 # MANTENIMIENTO SERIALIZERS
 # =======================================
 class DetalleMantenimientoSerializer(BaseModelSerializer):
-    """Serializer para Detalles de Mantenimiento"""
+    """
+    Serializer para Detalles de Mantenimiento.
 
-    servicio_nombre = serializers.CharField(source="servicio.nombre", read_only=True)
+    Representa los servicios realizados en un mantenimiento.
+    """
+
+    servicio_nombre = serializers.SerializerMethodField()
+    categoria_servicio = serializers.SerializerMethodField()
+    es_cambio_aceite = serializers.SerializerMethodField()
 
     class Meta:
         model = DetalleMantenimiento
@@ -1089,11 +1512,46 @@ class DetalleMantenimientoSerializer(BaseModelSerializer):
             "mantenimiento",
             "servicio",
             "servicio_nombre",
+            "categoria_servicio",
             "precio",
             "observaciones",
+            "tipo_aceite",
+            "km_proximo_cambio",
+            "es_cambio_aceite",
+            "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
+            # Agregar campo servicio completo para Flutter
+            "servicio_data",
         ]
+
+    def get_servicio_nombre(self, obj):
+        """Obtener nombre del servicio, manejando casos nulos"""
+        if hasattr(obj, "servicio") and obj.servicio:
+            return obj.servicio.nombre
+        return "Servicio eliminado"
+
+    def get_categoria_servicio(self, obj):
+        """Obtener categoría del servicio, manejando casos nulos"""
+        if (
+            hasattr(obj, "servicio")
+            and obj.servicio
+            and hasattr(obj.servicio, "categoria_servicio")
+            and obj.servicio.categoria_servicio
+        ):
+            return obj.servicio.categoria_servicio.nombre
+        return None
+
+    def get_servicio(self, obj):
+        """Retorna el objeto servicio completo para el frontend"""
+        if hasattr(obj, "servicio") and obj.servicio:
+            from .serializers import ServicioSerializer
+
+            return ServicioSerializer(obj.servicio).data
+        return None
+
+    def get_es_cambio_aceite(self, obj):
+        return obj.es_cambio_aceite()
 
     def validate_precio(self, value):
         if value <= 0:
@@ -1102,70 +1560,620 @@ class DetalleMantenimientoSerializer(BaseModelSerializer):
 
 
 class MantenimientoSerializer(BaseModelSerializer):
-    """Serializer para Mantenimientos"""
+    """
+    Serializer para Mantenimientos.
+
+    Incluye todos los campos del modelo más campos calculados
+    y validaciones específicas para el flujo de estados.
+    """
 
     detalles = DetalleMantenimientoSerializer(many=True, read_only=True)
+    # Usar string reference para evitar error de dependencia circular
+    repuestos = serializers.SerializerMethodField()
+
+    def get_repuestos(self, obj):
+        from .serializers import RepuestoMantenimientoSerializer
+
+        # Pasar el contexto de la request para generar URLs absolutas de imágenes
+        context = self.context if hasattr(self, "context") else {}
+        return RepuestoMantenimientoSerializer(
+            obj.repuestos.all(), many=True, context=context
+        ).data
+
+    # Campos de información de la moto (para lectura)
+    # Estos campos son de solo lectura porque el objeto moto se serializa completo
     moto_placa = serializers.CharField(source="moto.placa", read_only=True)
+    moto_marca = serializers.CharField(source="moto.marca", read_only=True)
+    moto_modelo = serializers.CharField(source="moto.modelo", read_only=True)
+    moto_año = serializers.IntegerField(source="moto.año", read_only=True)
+    moto_color = serializers.CharField(source="moto.color", read_only=True)
+    moto_cilindrada = serializers.IntegerField(source="moto.cilindrada", read_only=True)
     propietario_nombre = serializers.CharField(
         source="moto.propietario.nombre_completo", read_only=True
     )
+    propietario_cedula = serializers.CharField(
+        source="moto.propietario.cedula", read_only=True
+    )
+
+    # Include full moto object with propietario for frontend (read & write)
+    moto = serializers.PrimaryKeyRelatedField(
+        queryset=Moto.objects.all(),
+        required=True,
+        help_text="ID de la moto o objeto moto",
+    )
+    # Campo para mostrar la moto completa (solo lectura)
+    moto_data = serializers.SerializerMethodField()
+
+    def get_moto_data(self, obj):
+        """Retorna el objeto moto completo con propietario para el frontend"""
+        if hasattr(obj, "moto") and obj.moto:
+            # Evitar dependencia circular usando solo campos básicos
+            return {
+                "id": obj.moto.id,
+                "placa": obj.moto.placa,
+                "marca": obj.moto.marca,
+                "modelo": obj.moto.modelo,
+                "año": obj.moto.año,
+                "color": obj.moto.color,
+                "cilindrada": obj.moto.cilindrada,
+                "kilometraje": obj.moto.kilometraje,
+                "propietario": (
+                    {
+                        "id": obj.moto.propietario.id,
+                        "nombre_completo": obj.moto.propietario.nombre_completo,
+                        "cedula": obj.moto.propietario.cedula,
+                        "telefono": obj.moto.propietario.telefono,
+                    }
+                    if hasattr(obj.moto, "propietario") and obj.moto.propietario
+                    else None
+                ),
+            }
+        return None
+
     tecnico_asignado_nombre = serializers.CharField(
         source="tecnico_asignado.username", read_only=True
     )
+    tecnico_asignado_persona_nombre = serializers.SerializerMethodField(read_only=True)
+    tecnico_asignado_cedula = serializers.SerializerMethodField(read_only=True)
+
+    def get_tecnico_asignado_persona_nombre(self, obj):
+        """Obtener el nombre completo del técnico asignado a través de su persona asociada"""
+        if (
+            obj.tecnico_asignado
+            and hasattr(obj.tecnico_asignado, "persona_asociada")
+            and obj.tecnico_asignado.persona_asociada
+        ):
+            return obj.tecnico_asignado.persona_asociada.nombre_completo
+        return None
+
+    def get_tecnico_asignado_cedula(self, obj):
+        """Obtener la cédula del técnico asignado a través de su persona asociada"""
+        if (
+            obj.tecnico_asignado
+            and hasattr(obj.tecnico_asignado, "persona_asociada")
+            and obj.tecnico_asignado.persona_asociada
+        ):
+            return obj.tecnico_asignado.persona_asociada.cedula
+        return None
+
+    completado_por_nombre = serializers.CharField(
+        source="completado_por.username", read_only=True
+    )
+
+    # Campos de auditoría (Trazabilidad)
+    creado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    actualizado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    eliminado_por_nombre = serializers.SerializerMethodField(read_only=True)
+
+    def get_creado_por_nombre(self, obj):
+        """Obtener nombre del usuario que creó el mantenimiento"""
+        if hasattr(obj, "creado_por") and obj.creado_por:
+            # Primero buscar en persona_asociada
+            if (
+                hasattr(obj.creado_por, "persona_asociada")
+                and obj.creado_por.persona_asociada
+            ):
+                return obj.creado_por.persona_asociada.nombre_completo
+            # Luego buscar en persona
+            if hasattr(obj.creado_por, "persona") and obj.creado_por.persona:
+                return (
+                    f"{obj.creado_por.persona.nombre} {obj.creado_por.persona.apellido}"
+                )
+            # Finalmente usar username
+            return obj.creado_por.username
+        return None
+
+    def get_actualizado_por_nombre(self, obj):
+        """Obtener nombre del usuario que actualizó el mantenimiento"""
+        if hasattr(obj, "actualizado_por") and obj.actualizado_por:
+            # Primero buscar en persona_asociada
+            if (
+                hasattr(obj.actualizado_por, "persona_asociada")
+                and obj.actualizado_por.persona_asociada
+            ):
+                return obj.actualizado_por.persona_asociada.nombre_completo
+            # Luego buscar en persona
+            if hasattr(obj.actualizado_por, "persona") and obj.actualizado_por.persona:
+                return f"{obj.actualizado_por.persona.nombre} {obj.actualizado_por.persona.apellido}"
+            # Finalmente usar username
+            return obj.actualizado_por.username
+        return None
+
+    def get_eliminado_por_nombre(self, obj):
+        """Obtener nombre del usuario que eliminó el mantenimiento"""
+        if hasattr(obj, "eliminado_por") and obj.eliminado_por:
+            # Primero buscar en persona_asociada
+            if (
+                hasattr(obj.eliminado_por, "persona_asociada")
+                and obj.eliminado_por.persona_asociada
+            ):
+                return obj.eliminado_por.persona_asociada.nombre_completo
+            # Luego buscar en persona
+            if hasattr(obj.eliminado_por, "persona") and obj.eliminado_por.persona:
+                return f"{obj.eliminado_por.persona.nombre} {obj.eliminado_por.persona.apellido}"
+            # Finalmente usar username
+            return obj.eliminado_por.username
+        return None
+
+    # Campos calculados
+    servicios_count = serializers.SerializerMethodField()
+    repuestos_count = serializers.SerializerMethodField()
+    tiene_items = serializers.SerializerMethodField()
+    puede_completarse = serializers.SerializerMethodField()
+
+    # Campos para creación (usando ListField para datos anidados)
+    servicios = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    repuestos_data = serializers.ListField(
+        child=serializers.DictField(), required=False, write_only=True
+    )
+    recordatorio = serializers.DictField(required=False, write_only=True)
+
+    # Kilometraje de salida (para actualizar al completar)
+    kilometraje_salida = serializers.IntegerField(required=False, write_only=True)
 
     class Meta:
         model = Mantenimiento
         fields = [
             "id",
             "moto",
+            "moto_data",
             "moto_placa",
+            "moto_marca",
+            "moto_modelo",
+            "moto_año",
+            "moto_color",
+            "moto_cilindrada",
             "propietario_nombre",
+            "propietario_cedula",
             "tecnico_asignado",
             "tecnico_asignado_nombre",
+            "tecnico_asignado_persona_nombre",
+            "tecnico_asignado_cedula",
             "fecha_ingreso",
             "fecha_entrega",
             "descripcion_problema",
             "diagnostico",
             "estado",
+            "tipo",
+            "prioridad",
             "kilometraje_ingreso",
+            "kilometraje_salida",
+            "costo_adicional",
             "total",
+            "completado_por",
+            "completado_por_nombre",
+            "fecha_completado",
             "eliminado",
+            "eliminado_por",
+            "eliminado_por_nombre",
+            "fecha_eliminacion",
             "detalles",
+            "repuestos",
+            "servicios_count",
+            "repuestos_count",
+            "tiene_items",
+            "puede_completarse",
+            # Campos para creación
+            "servicios",
+            "repuestos_data",
+            "recordatorio",
+            # Campos de auditoría
+            "fecha_registro",
+            "fecha_actualizacion",
+            "creado_por",
+            "creado_por_nombre",
+            "actualizado_por",
+            "actualizado_por_nombre",
+        ]
+        read_only_fields = [
+            "moto_placa",
+            "moto_marca",
+            "moto_modelo",
+            "moto_año",
+            "moto_color",
+            "moto_cilindrada",
+            "propietario_nombre",
+            "propietario_cedula",
+            "total",
+            "completado_por",
+            "fecha_completado",
+            "servicios_count",
+            "repuestos_count",
+            "tiene_items",
+            "puede_completarse",
             "fecha_registro",
             "fecha_actualizacion",
         ]
 
+    def get_servicios_count(self, obj):
+        return obj.detalles.count()
+
+    def get_repuestos_count(self, obj):
+        return obj.repuestos.count()
+
+    def get_tiene_items(self, obj):
+        return obj.tiene_items()
+
+    def get_puede_completarse(self, obj):
+        return obj.puede_completarse()
+
     def validate_kilometraje_ingreso(self, value):
+        if value is None:
+            return value
         if value < 0:
             raise serializers.ValidationError("El kilometraje no puede ser negativo")
+        return value
+
+    def validate_estado(self, value):
+        """Valida que el estado sea válido"""
+        estados_validos = [choice[0] for choice in Mantenimiento.ESTADO_CHOICES]
+        if value not in estados_validos:
+            raise serializers.ValidationError(
+                f"Estado inválido. Estados válidos: {estados_validos}"
+            )
+        return value
+
+    def validate_tipo(self, value):
+        """Valida que el tipo sea válido"""
+        tipos_validos = [choice[0] for choice in Mantenimiento.TIPO_CHOICES]
+        if value not in tipos_validos:
+            raise serializers.ValidationError(
+                f"Tipo inválido. Tipos válidos: {tipos_validos}"
+            )
+        return value
+
+    def validate_prioridad(self, value):
+        """Valida que la prioridad sea válida"""
+        prioridades_validas = [choice[0] for choice in Mantenimiento.PRIORIDAD_CHOICES]
+        if value not in prioridades_validas:
+            raise serializers.ValidationError(
+                f"Prioridad inválida. Prioridades válidas: {prioridades_validas}"
+            )
         return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
-        # Validar fechas
-        if "fecha_ingreso" in attrs and "fecha_entrega" in attrs:
-            if (
-                attrs["fecha_entrega"]
-                and attrs["fecha_entrega"] <= attrs["fecha_ingreso"]
-            ):
+        # Validar que la moto esté presente en creación
+        if not self.instance and not attrs.get("moto"):
+            raise serializers.ValidationError({"moto": "Debes seleccionar una moto"})
+
+        # Validar fechas - solo si ambas están presentes
+        if "fecha_ingreso" in attrs and attrs.get("fecha_entrega"):
+            if attrs["fecha_entrega"] <= attrs["fecha_ingreso"]:
                 raise serializers.ValidationError(
                     {
                         "fecha_entrega": "La fecha de entrega debe ser posterior a la fecha de ingreso"
                     }
                 )
 
+        # Validar kilometraje vs moto actual - solo en create o si se envía el objeto moto
+        km_ingreso = attrs.get("kilometraje_ingreso")
+        moto = attrs.get("moto")
+
+        # Solo validar kilometraje si es un create (no instance) o si tenemos el objeto moto completo
+        if not self.instance and moto and km_ingreso is not None:
+            # Es un create - podemos validar normalmente
+            if hasattr(moto, "kilometraje"):
+                km_actual = moto.kilometraje or 0
+                if km_ingreso < km_actual:
+                    raise serializers.ValidationError(
+                        {
+                            "kilometraje_ingreso": f"El kilometraje de ingreso ({km_ingreso}) "
+                            f"no puede ser menor al kilometraje actual de la moto ({km_actual})"
+                        }
+                    )
+        elif self.instance and moto and km_ingreso is not None:
+            # Es un update - usar la moto de la instancia si el moto enviado es solo un ID
+            if hasattr(moto, "kilometraje"):
+                # El moto enviado es un objeto completo
+                km_actual = moto.kilometraje or 0
+                if km_ingreso < km_actual:
+                    raise serializers.ValidationError(
+                        {
+                            "kilometraje_ingreso": f"El kilometraje de ingreso ({km_ingreso}) "
+                            f"no puede ser menor al kilometraje actual de la moto ({km_actual})"
+                        }
+                    )
+            else:
+                # El moto enviado es un ID - usar la moto de la instancia
+                if hasattr(self.instance.moto, "kilometraje"):
+                    km_actual = self.instance.moto.kilometraje or 0
+                    if km_ingreso < km_actual:
+                        raise serializers.ValidationError(
+                            {
+                                "kilometraje_ingreso": f"El kilometraje de ingreso ({km_ingreso}) "
+                                f"no puede ser menor al kilometraje actual de la moto ({km_actual})"
+                            }
+                        )
+
+        # Validar transición de estado si es update
+        if self.instance and "estado" in attrs:
+            nuevo_estado = attrs["estado"]
+            if nuevo_estado and self.instance.estado != nuevo_estado:
+                if not self.instance.puede_cambiar_a(nuevo_estado):
+                    raise serializers.ValidationError(
+                        {
+                            "estado": f"No se puede cambiar de '{self.instance.estado}' a '{nuevo_estado}'. "
+                            f"Flujo válido: pendiente → en_proceso → completado"
+                        }
+                    )
+
+        # Validar que tenga items si intenta completar
+        if self.instance and attrs.get("estado") == "completado":
+            if not self.instance.tiene_items():
+                raise serializers.ValidationError(
+                    {
+                        "estado": "No se puede completar un mantenimiento sin servicios ni repuestos"
+                    }
+                )
+
         return attrs
+
+    def create(self, validated_data):
+        # Extract servicios, repuestos, recordatorio from validated_data
+        servicios_data = validated_data.pop("servicios", [])
+        repuestos_data = validated_data.pop("repuestos_data", [])
+        recordatorio_data = validated_data.pop("recordatorio", None)
+        kilometraje_salida = validated_data.pop("kilometraje_salida", None)
+
+        # Create Mantenimiento instance
+        instance = super().create(validated_data)
+
+        # Guardar kilometraje de salida si se proporciona
+        if kilometraje_salida:
+            instance.kilometraje_salida = kilometraje_salida
+
+        # Create detalles from servicios
+        from decimal import Decimal
+
+        for servicio_data in servicios_data:
+            # Support both 'servicio' and 'servicio_id' keys
+            servicio_id = (
+                servicio_data.get("servicio")
+                or servicio_data.get("servicio_id")
+                or servicio_data.get("id")
+            )
+            if not servicio_id:
+                logger.warning(f"Servicio sin ID encontrado en datos: {servicio_data}")
+                continue
+
+            precio = Decimal(str(servicio_data.get("precio", 0)))
+            tipo_aceite = servicio_data.get("tipo_aceite")
+            km_proximo_cambio = servicio_data.get("km_proximo_cambio")
+            observaciones = servicio_data.get("observaciones", "")
+
+            # Get the servicio object
+            from core.models import Servicio
+
+            try:
+                servicio_obj = Servicio.objects.get(id=servicio_id)
+            except Servicio.DoesNotExist:
+                continue
+
+            # Create detalle
+            DetalleMantenimiento.objects.create(
+                mantenimiento=instance,
+                servicio=servicio_obj,
+                precio=precio,
+                observaciones=observaciones,
+                tipo_aceite=tipo_aceite,
+                km_proximo_cambio=km_proximo_cambio,
+            )
+
+        # Create repuestos
+        for repuesto_data in repuestos_data:
+            from core.services import MantenimientoService
+
+            try:
+                MantenimientoService.agregar_repuesto(
+                    instance,
+                    repuesto_data,
+                    validar_stock=False,  # Permitir crear aunque haya problemas de stock
+                )
+            except Exception as e:
+                logger.warning(f"Error al agregar repuesto: {e}")
+
+        # Calcular total automáticamente
+        instance.calcular_total()
+
+        # Create recordatorio if provided
+        if recordatorio_data:
+            from core.models import (
+                RecordatorioMantenimiento,
+                CategoriaServicio,
+                Servicio,
+            )
+
+            # Get categoria_servicio ID from recordatorio_data or determine from servicios
+            categoria_servicio_id = recordatorio_data.get("categoria_servicio")
+            categoria_servicio = None
+
+            if categoria_servicio_id:
+                # Buscar por ID si se proporciona
+                try:
+                    categoria_servicio = CategoriaServicio.objects.get(
+                        id=categoria_servicio_id
+                    )
+                except CategoriaServicio.DoesNotExist:
+                    categoria_servicio = None
+            else:
+                # 自动获取第一个服务的类别（当用户选择"cambio de aceite"时）
+                for servicio_data in servicios_data:
+                    servicio_id = (
+                        servicio_data.get("servicio")
+                        or servicio_data.get("servicio_id")
+                        or servicio_data.get("id")
+                    )
+                    if servicio_id:
+                        try:
+                            servicio_obj = Servicio.objects.get(id=servicio_id)
+                            categoria_servicio = servicio_obj.categoria_servicio
+                            break  # Usar la primera categoría encontrada
+                        except Servicio.DoesNotExist:
+                            continue
+
+            # Solo crear recordatorio si tenemos la categoría de servicio
+            if categoria_servicio:
+                RecordatorioMantenimiento.objects.create(
+                    moto=instance.moto,
+                    categoria_servicio=categoria_servicio,
+                    tipo=recordatorio_data.get("tipo", "km"),
+                    km_proximo=recordatorio_data.get("km_proximo"),
+                    fecha_programada=recordatorio_data.get("fecha_programada"),
+                )
+
+        return instance
+
+    def update(self, instance, validated_data):
+        # Extraer datos especiales
+        kilometraje_salida = validated_data.pop("kilometraje_salida", None)
+        nuevo_estado = validated_data.get("estado")
+
+        # Extraer servicios y repuestos si se proporcionan
+        servicios_data = validated_data.pop("servicios", [])
+        repuestos_data = validated_data.pop("repuestos_data", [])
+        recordatorio_data = validated_data.pop("recordatorio", None)
+
+        # Guardar estado anterior
+        estado_anterior = instance.estado
+
+        # Actualizar instancia
+        instance = super().update(instance, validated_data)
+
+        # Procesar servicios si se proporcionan
+        if servicios_data:
+            from core.models import Servicio, DetalleMantenimiento
+            from decimal import Decimal
+
+            # Eliminar servicios existentes
+            instance.detalles.all().delete()
+
+            for servicio_data in servicios_data:
+                servicio_id = (
+                    servicio_data.get("servicio")
+                    or servicio_data.get("servicio_id")
+                    or servicio_data.get("id")
+                )
+                if not servicio_id:
+                    continue
+
+                precio = Decimal(str(servicio_data.get("precio", 0)))
+                tipo_aceite = servicio_data.get("tipo_aceite")
+                km_proximo_cambio = servicio_data.get("km_proximo_cambio")
+                observaciones = servicio_data.get("observaciones", "")
+
+                try:
+                    servicio_obj = Servicio.objects.get(id=servicio_id)
+                    DetalleMantenimiento.objects.create(
+                        mantenimiento=instance,
+                        servicio=servicio_obj,
+                        precio=precio,
+                        observaciones=observaciones,
+                        tipo_aceite=tipo_aceite,
+                        km_proximo_cambio=km_proximo_cambio,
+                    )
+                except Servicio.DoesNotExist:
+                    pass
+
+        # Procesar repuestos si se proporcionan
+        if repuestos_data:
+            from core.services import MantenimientoService
+
+            # Eliminar repuestos existentes
+            instance.repuestos.all().delete()
+
+            for repuesto_data in repuestos_data:
+                try:
+                    MantenimientoService.agregar_repuesto(
+                        instance,
+                        repuesto_data,
+                        validar_stock=False,
+                    )
+                except Exception as e:
+                    logger.warning(f"Error al agregar repuesto: {e}")
+
+        # Recalcular total
+        instance.calcular_total()
+
+        # Si cambió a completado, actualizar kilometraje de la moto
+        if nuevo_estado == "completado" and estado_anterior != "completado":
+            instance.fecha_completado = timezone.now()
+            if self.context.get("request"):
+                instance.completado_por = self.context["request"].user
+
+            if kilometraje_salida:
+                instance.kilometraje_salida = kilometraje_salida
+                instance.moto.kilometraje = kilometraje_salida
+                instance.moto.save(update_fields=["kilometraje"])
+
+            instance.save(
+                update_fields=[
+                    "fecha_completado",
+                    "completado_por",
+                    "kilometraje_salida",
+                ]
+            )
+
+        return instance
+
+    def _calculate_total(self, mantenimiento, detalles_data):
+        """Calculate total from servicios and repuestos"""
+        from decimal import Decimal
+
+        total = Decimal("0.00")
+
+        # Add from detalles (servicios)
+        for detalle_data in detalles_data:
+            precio = detalle_data.get("precio", Decimal("0.00"))
+            total += precio
+
+        # Add from repuestos if any
+        for detalle in mantenimiento.detalles.all():
+            for repuesto in detalle.repuestos.all():
+                total += repuesto.subtotal
+
+        return total
 
 
 class RecordatorioMantenimientoSerializer(BaseModelSerializer):
-    """Serializer para Recordatorios de Mantenimiento"""
+    """
+    Serializer para Recordatorios de Mantenimiento.
+
+    Gestiona los recordatorios de mantenimiento programados
+    por kilometraje o fecha.
+    """
 
     moto_placa = serializers.CharField(source="moto.placa", read_only=True)
+    moto_marca = serializers.CharField(source="moto.marca", read_only=True)
+    moto_modelo = serializers.CharField(source="moto.modelo", read_only=True)
     categoria_servicio_nombre = serializers.CharField(
         source="categoria_servicio.nombre", read_only=True
     )
-    es_proximo = serializers.SerializerMethodField()
+    info_proximo = serializers.SerializerMethodField()
+    esta_vencido = serializers.SerializerMethodField()
 
     class Meta:
         model = RecordatorioMantenimiento
@@ -1173,23 +2181,45 @@ class RecordatorioMantenimientoSerializer(BaseModelSerializer):
             "id",
             "moto",
             "moto_placa",
+            "moto_marca",
+            "moto_modelo",
             "categoria_servicio",
             "categoria_servicio_nombre",
+            "tipo",
             "fecha_programada",
+            "km_proximo",
             "enviado",
-            "es_proximo",
+            "activo",
+            "notas",
+            "info_proximo",
+            "esta_vencido",
+            "registrado_por",
+            "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
         ]
 
-    def get_es_proximo(self, obj):
+    def get_info_proximo(self, obj):
         return obj.proximo()
+
+    def get_esta_vencido(self, obj):
+        return obj.esta_vencido()
 
 
 class RepuestoMantenimientoSerializer(serializers.ModelSerializer):
+    """
+    Serializer para Repuestos de Mantenimiento.
+
+    Gestiona el uso de repuestos en un mantenimiento,
+    incluyendo control de stock.
+    """
+
     # Mostrar información del producto
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     producto_codigo = serializers.CharField(source="producto.codigo", read_only=True)
+    producto_imagen = serializers.SerializerMethodField()
+    stock_disponible = serializers.SerializerMethodField()
+    tiene_stock_suficiente = serializers.SerializerMethodField()
 
     class Meta:
         model = RepuestoMantenimiento
@@ -1199,37 +2229,67 @@ class RepuestoMantenimientoSerializer(serializers.ModelSerializer):
             "producto",
             "producto_nombre",
             "producto_codigo",
+            "producto_imagen",
             "cantidad",
             "precio_unitario",
             "subtotal",
+            "permitir_sin_stock",
+            "stock_disponible",
+            "tiene_stock_suficiente",
+            "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
         ]
-        read_only_fields = ["subtotal", "fecha_registro", "fecha_actualizacion"]
+        read_only_fields = [
+            "subtotal",
+            "stock_disponible",
+            "tiene_stock_suficiente",
+            "fecha_registro",
+            "fecha_actualizacion",
+        ]
+
+    def get_producto_imagen(self, obj):
+        """Obtener la URL de la imagen del producto"""
+        if obj.producto and obj.producto.imagen:
+            request = self.context.get("request")
+            if request:
+                return request.build_absolute_uri(obj.producto.imagen.url)
+            return obj.producto.imagen.url
+        return None
+
+    def get_stock_disponible(self, obj):
+        try:
+            return obj.producto.inventario.stock_actual
+        except (Inventario.DoesNotExist, AttributeError):
+            return 0
+
+    def get_tiene_stock_suficiente(self, obj):
+        return obj.tiene_stock_suficiente()
 
     def validate(self, data):
         """Validar stock del producto antes de usarlo en mantenimiento"""
         producto = data.get("producto")
-        cantidad = data.get("cantidad")
+        cantidad = data.get("cantidad", 1)
+        permitir_sin_stock = data.get("permitir_sin_stock", False)
+
         if producto and cantidad:
-            if producto.stock_actual < cantidad:
+            # Verificar stock disponible
+            try:
+                inventario = producto.inventario
+                stock_disponible = inventario.stock_actual
+            except Inventario.DoesNotExist:
+                stock_disponible = 0
+
+            # Validar solo si no se permite usar sin stock
+            if not permitir_sin_stock and stock_disponible < cantidad:
                 raise serializers.ValidationError(
                     {
-                        "cantidad": f"Stock insuficiente. Disponible: {producto.stock_actual}"
+                        "cantidad": f"Stock insuficiente. Disponible: {stock_disponible}, "
+                        f"Solicitado: {cantidad}. "
+                        f"Use permitir_sin_stock=True para forzar el uso."
                     }
                 )
         return data
-
-    def create(self, validated_data):
-        """Descontar stock al usar repuesto"""
-        producto = validated_data["producto"]
-        cantidad = validated_data["cantidad"]
-
-        # Descontar stock
-        producto.stock_actual -= cantidad
-        producto.save(update_fields=["stock_actual"])
-
-        return super().create(validated_data)
 
 
 # =======================================
@@ -1281,6 +2341,9 @@ class VentaSerializer(serializers.ModelSerializer):
     cliente_apellido = serializers.CharField(source="cliente.apellido", read_only=True)
     cliente_cedula = serializers.CharField(source="cliente.cedula", read_only=True)
     registrado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    creado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    actualizado_por_nombre = serializers.SerializerMethodField(read_only=True)
+    eliminado_por_nombre = serializers.SerializerMethodField(read_only=True)
     pagado = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     saldo = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
 
@@ -1294,12 +2357,23 @@ class VentaSerializer(serializers.ModelSerializer):
             "cliente_cedula",
             "fecha_venta",
             "subtotal",
+            "descuento",
             "impuesto",
             "total",
+            "notas",
             "estado",
             "eliminado",
+            "creado_por",
+            "creado_por_nombre",
             "registrado_por",
             "registrado_por_nombre",
+            "actualizado_por",
+            "actualizado_por_nombre",
+            "eliminado_por",
+            "eliminado_por_nombre",
+            "fecha_eliminacion",
+            "fecha_registro",
+            "fecha_actualizacion",
             "pagado",
             "saldo",
             "detalles",
@@ -1353,31 +2427,163 @@ class VentaSerializer(serializers.ModelSerializer):
             return obj.registrado_por.correo_electronico
         return None
 
+    def get_creado_por_nombre(self, obj):
+        """Obtener nombre completo del usuario que creó la venta"""
+        if obj.creado_por:
+            # Intentar obtener el nombre desde la persona asociada
+            try:
+                if (
+                    hasattr(obj.creado_por, "persona_asociada")
+                    and obj.creado_por.persona_asociada
+                ):
+                    return obj.creado_por.persona_asociada.nombre_completo
+            except:
+                pass
+
+            # Intentar obtener desde la relación inversa persona
+            try:
+                persona = obj.creado_por.persona
+                if persona:
+                    return persona.nombre_completo
+            except:
+                pass
+
+            # Fallback al correo electrónico
+            return obj.creado_por.correo_electronico
+        return None
+
+    def get_actualizado_por_nombre(self, obj):
+        """Obtener nombre completo del usuario que actualizó la venta"""
+        if obj.actualizado_por:
+            try:
+                if (
+                    hasattr(obj.actualizado_por, "persona_asociada")
+                    and obj.actualizado_por.persona_asociada
+                ):
+                    return obj.actualizado_por.persona_asociada.nombre_completo
+            except:
+                pass
+
+            try:
+                persona = obj.actualizado_por.persona
+                if persona:
+                    return persona.nombre_completo
+            except:
+                pass
+
+            return obj.actualizado_por.correo_electronico
+        return None
+
+    def get_eliminado_por_nombre(self, obj):
+        """Obtener nombre completo del usuario que eliminó la venta"""
+        if obj.eliminado_por:
+            try:
+                if (
+                    hasattr(obj.eliminado_por, "persona_asociada")
+                    and obj.eliminado_por.persona_asociada
+                ):
+                    return obj.eliminado_por.persona_asociada.nombre_completo
+            except:
+                pass
+
+            try:
+                persona = obj.eliminado_por.persona
+                if persona:
+                    return persona.nombre_completo
+            except:
+                pass
+
+            return obj.eliminado_por.correo_electronico
+        return None
+
     def create(self, validated_data):
         """Crear venta y asignar usuario registrador"""
         request = self.context.get("request")
         if request and hasattr(request, "user"):
             validated_data["registrado_por"] = request.user
+            validated_data["creado_por"] = request.user
         return super().create(validated_data)
 
 
 class VentaPOSSerializer(serializers.ModelSerializer):
     """Serializer específico para ventas desde POS"""
 
-    items = serializers.ListField(write_only=True)
+    items = serializers.ListField(write_only=True, required=False)
+    productos = serializers.ListField(write_only=True, required=False)
     cliente_id = serializers.IntegerField(required=False, allow_null=True)
     metodo_pago = serializers.CharField(max_length=20, default="efectivo")
+    descuento = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, default=Decimal("0.00")
+    )
+    notas = serializers.CharField(
+        max_length=500, required=False, allow_blank=True, default=""
+    )
 
     class Meta:
         model = Venta
-        fields = ["cliente_id", "subtotal", "impuesto", "total", "items", "metodo_pago"]
+        fields = [
+            "cliente_id",
+            "subtotal",
+            "descuento",
+            "impuesto",
+            "total",
+            "notas",
+            "items",
+            "productos",
+            "metodo_pago",
+        ]
+
+    def validate(self, attrs):
+        # Aceptar tanto "items" como "productos" del frontend
+        items = attrs.get("items")
+        productos = attrs.get("productos")
+
+        if not items and not productos:
+            raise serializers.ValidationError("Debe incluir al menos un producto")
+
+        # Unir las listas si existen ambas
+        final_items = items or []
+        if productos:
+            final_items = productos
+
+        if not final_items or len(final_items) == 0:
+            raise serializers.ValidationError("Debe incluir al menos un producto")
+
+        for item in final_items:
+            # Aceptar tanto "producto_id" como "id" como identificador del producto
+            has_producto = "producto_id" in item or "id" in item
+            if not has_producto:
+                raise serializers.ValidationError(
+                    f"Campo producto_id o id requerido en items"
+                )
+
+            required_fields = ["cantidad", "precio_unitario", "subtotal"]
+            for field in required_fields:
+                if field not in item:
+                    raise serializers.ValidationError(
+                        f"Campo {field} requerido en items"
+                    )
+
+        # Guardar los items normalizados
+        attrs["items"] = final_items
+        if "productos" in attrs:
+            del attrs["productos"]
+
+        return attrs
 
     def validate_items(self, items):
         if not items or len(items) == 0:
             raise serializers.ValidationError("Debe incluir al menos un producto")
 
         for item in items:
-            required_fields = ["producto_id", "cantidad", "precio_unitario", "subtotal"]
+            # Aceptar tanto "producto_id" como "id" como identificador del producto
+            has_producto = "producto_id" in item or "id" in item
+            if not has_producto:
+                raise serializers.ValidationError(
+                    f"Campo producto_id o id requerido en items"
+                )
+
+            required_fields = ["cantidad", "precio_unitario", "subtotal"]
             for field in required_fields:
                 if field not in item:
                     raise serializers.ValidationError(
@@ -1516,14 +2722,73 @@ VentaSerializer.Meta.fields.append("pagos")
 class InventarioSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.SerializerMethodField(read_only=True)
     producto_codigo = serializers.SerializerMethodField(read_only=True)
+    producto_imagen = serializers.SerializerMethodField(read_only=True)
     stock_actual = serializers.IntegerField(required=True, min_value=0)
     stock_minimo = serializers.IntegerField(required=True, min_value=0)
+
+    # Campos de auditoría
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
 
     def get_producto_nombre(self, obj):
         return obj.producto.nombre if obj.producto else "Producto no disponible"
 
     def get_producto_codigo(self, obj):
         return obj.producto.codigo if obj.producto else "N/A"
+
+    def get_producto_imagen(self, obj):
+        if obj.producto and obj.producto.imagen:
+            return obj.producto.imagen.url
+        return None
+
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
 
     class Meta:
         model = Inventario
@@ -1532,10 +2797,17 @@ class InventarioSerializer(serializers.ModelSerializer):
             "producto",
             "producto_nombre",
             "producto_codigo",
+            "producto_imagen",
             "stock_actual",
             "stock_minimo",
             "activo",
             "eliminado",
+            "fecha_registro",
+            "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
         ]
         read_only_fields = ["producto"]
 
@@ -1580,6 +2852,59 @@ class InventarioMovimientoSerializer(serializers.ModelSerializer):
         source="inventario.producto.codigo", read_only=True
     )
 
+    # Campos de auditoría
+    creado_por = serializers.SerializerMethodField(read_only=True)
+    actualizado_por = serializers.SerializerMethodField(read_only=True)
+    eliminado_por = serializers.SerializerMethodField(read_only=True)
+
+    def get_creado_por(self, obj):
+        if obj.creado_por:
+            user = obj.creado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_actualizado_por(self, obj):
+        if obj.actualizado_por:
+            user = obj.actualizado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
+    def get_eliminado_por(self, obj):
+        if obj.eliminado_por:
+            user = obj.eliminado_por
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
+
     class Meta:
         model = InventarioMovimiento
         fields = [
@@ -1595,6 +2920,10 @@ class InventarioMovimientoSerializer(serializers.ModelSerializer):
             "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
+            "fecha_eliminacion",
+            "creado_por",
+            "actualizado_por",
+            "eliminado_por",
         ]
         read_only_fields = ["usuario"]
 
@@ -1625,7 +2954,9 @@ class RecordatorioMantenimientoSerializer(serializers.ModelSerializer):
             "categoria_servicio",
             "moto_id",
             "categoria_servicio_id",
+            "tipo",
             "fecha_programada",
+            "km_proximo",
             "enviado",
             "activo",
             "eliminado",
@@ -1672,3 +3003,8 @@ class RecordatorioMantenimientoSerializer(serializers.ModelSerializer):
 
         instance.save()
         return instance
+
+
+# =======================================
+# VENTAS - PRECIOS ESPECIALES POR CLIENTE
+# =======================================

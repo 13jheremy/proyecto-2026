@@ -1,7 +1,8 @@
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, filters
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from django.http import Http404
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.views import APIView
@@ -9,6 +10,7 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django_filters.rest_framework import DjangoFilterBackend
 from django.contrib.auth import authenticate
+from django.db import models, transaction
 from django.db.models import (
     Count,
     Sum,
@@ -21,11 +23,6 @@ from django.db.models import (
     fields,
 )
 from django.db.models.functions import Coalesce
-from django.utils import timezone
-from datetime import timedelta
-from rest_framework import viewsets, filters
-from django_filters.rest_framework import DjangoFilterBackend
-from django.db import transaction
 from django.utils import timezone
 from datetime import datetime, timedelta
 import logging
@@ -42,6 +39,7 @@ from .permissions import (
     IsOwner,
     CustomPermission,
 )
+from ..services import fcm_service
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +63,7 @@ class BaseViewSet(viewsets.ModelViewSet):
     """
     ViewSet base optimizado con funcionalidades comunes:
     - Soft delete automático
+    - Restauración de registros eliminados
     - Filtros estándar por activo/eliminado
     - Búsqueda avanzada
     - Acciones comunes (activar, desactivar, etc.)
@@ -81,7 +80,8 @@ class BaseViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Retorna el queryset base optimizado"""
         model = self.serializer_class.Meta.model
-        qs = model.objects.all()
+        # Usar objects_all para poder ver registros eliminados cuando sea necesario
+        qs = getattr(model, "objects_all", model.objects).all()
 
         # Aplicar filtros de eliminado si el modelo lo soporta
         eliminado = self.request.query_params.get("eliminado")
@@ -110,16 +110,20 @@ class BaseViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        """Configurar usuario creador automáticamente"""
+        """Configurar usuario creador automáticamente y notificar"""
         model = serializer.Meta.model
 
         try:
             # Intentar asignar usuario según el campo disponible
             save_kwargs = {}
 
-            if hasattr(model, "usuario") and self.request.user.is_authenticated:
+            if hasattr(model, "creado_por") and self.request.user.is_authenticated:
+                save_kwargs["creado_por"] = self.request.user
+            elif hasattr(model, "usuario") and self.request.user.is_authenticated:
                 save_kwargs["usuario"] = self.request.user
-            elif hasattr(model, "registrado_por") and self.request.user.is_authenticated:
+            elif (
+                hasattr(model, "registrado_por") and self.request.user.is_authenticated
+            ):
                 save_kwargs["registrado_por"] = self.request.user
 
             # Guardar con los parámetros apropiados
@@ -131,27 +135,164 @@ class BaseViewSet(viewsets.ModelViewSet):
             logger.info(
                 f"Creado {model.__name__} ID={serializer.instance.id} por usuario {self.request.user.username if self.request.user.is_authenticated else 'N/A'}"
             )
+
+            # Enviar notificación de creación
+            self._enviar_notificacion_cambio(
+                accion="creado",
+                modelo=model.__name__,
+                instance_id=serializer.instance.id,
+                instance=serializer.instance,
+            )
         except Exception as e:
             logger.error(f"Error creando {model.__name__}: {str(e)}")
             raise APIException(f"Error al crear {model.__name__}: {str(e)}")
 
+    def perform_update(self, serializer):
+        """Configurar usuario que actualiza automáticamente y notificar"""
+        model = serializer.Meta.model
+
+        try:
+            # Establecer el usuario que actualiza el registro
+            if hasattr(model, "actualizado_por") and self.request.user.is_authenticated:
+                serializer.save(actualizado_por=self.request.user)
+            else:
+                serializer.save()
+
+            logger.info(
+                f"Actualizado {model.__name__} ID={serializer.instance.id} por usuario {self.request.user.username if self.request.user.is_authenticated else 'N/A'}"
+            )
+
+            # Enviar notificación de actualización
+            self._enviar_notificacion_cambio(
+                accion="actualizado",
+                modelo=model.__name__,
+                instance_id=serializer.instance.id,
+                instance=serializer.instance,
+            )
+        except Exception as e:
+            logger.error(f"Error actualizando {model.__name__}: {str(e)}")
+            raise APIException(f"Error al actualizar {model.__name__}: {str(e)}")
+
     def perform_destroy(self, instance):
-        """Soft delete por defecto"""
+        """Soft delete por defecto con auditoría y notificación"""
         try:
             if hasattr(instance, "eliminado"):
+                # Configurar el usuario actual para soft delete
+                from django.utils import timezone
+
                 instance.eliminado = True
-                instance.save(update_fields=["eliminado"])
+                instance.fecha_eliminacion = timezone.now()
+
+                # Establecer el usuario que elimina si está autenticado
+                if (
+                    hasattr(instance, "eliminado_por")
+                    and self.request.user.is_authenticated
+                ):
+                    instance.eliminado_por = self.request.user
+
+                instance.save(
+                    update_fields=["eliminado", "fecha_eliminacion", "eliminado_por"]
+                )
                 logger.info(
-                    f"Soft delete {instance.__class__.__name__} ID={instance.id}"
+                    f"Soft delete {instance.__class__.__name__} ID={instance.id} por usuario {self.request.user.username if self.request.user.is_authenticated else 'N/A'}"
+                )
+
+                # Enviar notificación de eliminación
+                self._enviar_notificacion_cambio(
+                    accion="eliminado",
+                    modelo=instance.__class__.__name__,
+                    instance_id=instance.id,
+                    instance=instance,
                 )
             else:
+                # Este caso no debería alcanzarse para modelos con soft delete
+                # Pero se mantiene por compatibilidad
                 instance.delete()
                 logger.info(
-                    f"Hard delete {instance.__class__.__name__} ID={instance.id}"
+                    f"Delete (sin campo eliminado) {instance.__class__.__name__} ID={instance.id}"
                 )
         except Exception as e:
             logger.error(f"Error eliminando {instance.__class__.__name__}: {str(e)}")
             raise APIException(f"Error al eliminar: {str(e)}")
+
+    def _enviar_notificacion_cambio(self, accion, modelo, instance_id, instance=None):
+        """
+        Envía notificaciones push cuando se crea, actualiza o elimina un registro.
+        Solo envía notificaciones para modelos específicos (Mantenimiento, Servicio, etc.)
+        """
+        # Modelos que queremos notificar
+        modelos_a_notificar = [
+            "Mantenimiento",
+            "Servicio",
+            "CategoriaServicio",
+            "Producto",
+            "Inventario",
+            "Moto",
+            "Cliente",
+            "Usuario",
+        ]
+
+        if modelo not in modelos_a_notificar:
+            return
+
+        # Determinar título y cuerpo según la acción
+        if accion == "creado":
+            titulo = f"Nuevo {modelo}"
+            cuerpo = f"Se ha creado un nuevo registro de {modelo} (ID: {instance_id})"
+        elif accion == "actualizado":
+            titulo = f"{modelo} actualizado"
+            cuerpo = f"El registro de {modelo} (ID: {instance_id}) ha sido actualizado"
+        elif accion == "eliminado":
+            titulo = f"{modelo} eliminado"
+            cuerpo = f"El registro de {modelo} (ID: {instance_id}) ha sido eliminado"
+        else:
+            return
+
+        # Obtener información adicional del registro
+        data = {
+            "accion": accion,
+            "modelo": modelo,
+            "id": str(instance_id),
+            "timestamp": timezone.now().isoformat(),
+        }
+
+        # Intentar agregar información relevante según el modelo
+        if instance:
+            if modelo == "Mantenimiento" and hasattr(instance, "moto"):
+                try:
+                    data["moto_placa"] = instance.moto.placa if instance.moto else None
+                    data["estado"] = instance.estado
+                except:
+                    pass
+            elif modelo == "Moto" and hasattr(instance, "placa"):
+                data["placa"] = instance.placa
+            elif modelo == "Servicio" and hasattr(instance, "nombre"):
+                data["nombre"] = instance.nombre
+
+        # Enviar notificación a todos los dispositivos registrados
+        try:
+            from ..models import Dispositivo
+
+            dispositivos = Dispositivo.objects.filter(activo=True)
+
+            for dispositivo in dispositivos:
+                if dispositivo.fcm_token:
+                    try:
+                        fcm_service.send_notification(
+                            token=dispositivo.fcm_token,
+                            title=titulo,
+                            body=cuerpo,
+                            data=data,
+                        )
+                        logger.info(
+                            f"Notificación enviada a dispositivo {dispositivo.id}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Error enviando notificación a dispositivo {dispositivo.id}: {e}"
+                        )
+        except Exception as e:
+            logger.warning(f"Error al obtener dispositivos para notificación: {e}")
 
     # =======================================
     # ACCIONES COMUNES ESTANDARIZADAS
@@ -167,7 +308,12 @@ class BaseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        instance.activo = not instance.activo
+        # Si se proporciona activo en el request, usarlo; de lo contrario, togglear
+        activo_value = request.data.get("activo")
+        if activo_value is not None:
+            instance.activo = bool(activo_value)
+        else:
+            instance.activo = not instance.activo
         instance.save(update_fields=["activo"])
         serializer = self.get_serializer(instance)
         logger.info(
@@ -197,14 +343,24 @@ class BaseViewSet(viewsets.ModelViewSet):
                     f"🔍 SOFT DELETE DEBUG - ERROR: Modelo {instance.__class__.__name__} no tiene campo eliminado"
                 )
                 return Response(
-                    {"error": "Este modelo no soporta eliminación temporal"},
+                    {"error": "Este modelo no soporta eliminación"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            from django.utils import timezone
+
             instance.eliminado = True
-            instance.save(update_fields=["eliminado"])
+            instance.fecha_eliminacion = timezone.now()
+
+            # Establecer el usuario que elimina si está autenticado
+            if hasattr(instance, "eliminado_por") and request.user.is_authenticated:
+                instance.eliminado_por = request.user
+
+            instance.save(
+                update_fields=["eliminado", "fecha_eliminacion", "eliminado_por"]
+            )
             logger.info(
-                f"🔍 SOFT DELETE DEBUG - SUCCESS: {instance.__class__.__name__} ID={instance.id} marcado como eliminado"
+                f"🔍 SOFT DELETE DEBUG - SUCCESS: {instance.__class__.__name__} ID={instance.id} marcado como eliminado por {request.user.username if request.user.is_authenticated else 'N/A'}"
             )
 
             response_data = {
@@ -224,11 +380,11 @@ class BaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["patch"], url_path="restore")
     def restore(self, request, pk=None):
-        """Restaurar registro eliminado temporalmente"""
+        """Restaurar registro eliminado"""
         model = self.serializer_class.Meta.model
         try:
-            # Use objects.all() instead of objects_all
-            instance = model.objects.get(pk=pk)
+            # Use objects_all to get deleted records
+            instance = model.objects_all.get(pk=pk)
         except model.DoesNotExist:
             return Response(
                 {"detail": f"{model.__name__} no encontrado"},
@@ -241,31 +397,24 @@ class BaseViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Restaurar el registro y limpiar campos de eliminación
         instance.eliminado = False
-        instance.save(update_fields=["eliminado"])
-        serializer = self.get_serializer(instance)
-        logger.info(f"Restaurado {instance.__class__.__name__} ID={instance.id}")
-        return Response(serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=["delete"], url_path="hard_delete")
-    def hard_delete(self, request, pk=None):
-        """Eliminación física permanente"""
-        model = self.serializer_class.Meta.model
-        try:
-            instance = model.objects_all.get(pk=pk)
-            model_name = instance.__class__.__name__
-            instance_id = instance.id
-            instance.delete_real()  # Usar delete_real() para eliminación física permanente
-            logger.warning(f"Eliminación permanente {model_name} ID={instance_id}")
-            return Response(
-                {"status": f"{model_name} eliminado permanentemente"},
-                status=status.HTTP_204_NO_CONTENT,
-            )
-        except model.DoesNotExist:
-            return Response(
-                {"error": f"{model.__name__} no encontrado"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        # Limpiar campos de eliminación si existen
+        update_fields = ["eliminado"]
+        if hasattr(instance, "fecha_eliminacion"):
+            instance.fecha_eliminacion = None
+            update_fields.append("fecha_eliminacion")
+        if hasattr(instance, "eliminado_por"):
+            instance.eliminado_por = None
+            update_fields.append("eliminado_por")
+
+        instance.save(update_fields=update_fields)
+        serializer = self.get_serializer(instance)
+        logger.info(
+            f"Restaurado {instance.__class__.__name__} ID={instance.id} por usuario {request.user.username if request.user.is_authenticated else 'N/A'}"
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     # =======================================
     # ACCIONES DE CONSULTA AVANZADA
@@ -326,12 +475,22 @@ class CustomTokenObtainPairView(TokenObtainPairView):
             return response
         except Exception as e:
             logger.error(f"Error en login: {str(e)}")
-            # Verificar si es un error de credenciales inválidas
-            if "Invalid credentials" in str(e) or "Unable to log in" in str(e):
+
+            error_msg = str(e)
+            if "Usuario no existe" in error_msg:
                 return Response(
-                    {"detail": "Usuario o contraseña incorrectos"},
+                    {"detail": "Usuario no existe"}, status=status.HTTP_401_UNAUTHORIZED
+                )
+            elif "Credenciales erroneas" in error_msg:
+                return Response(
+                    {"detail": "Credenciales erroneas"},
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
+            elif "Usuario inactivo" in error_msg:
+                return Response(
+                    {"detail": "Usuario inactivo"}, status=status.HTTP_401_UNAUTHORIZED
+                )
+
             return Response(
                 {"detail": "Error interno del servidor"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -358,6 +517,27 @@ class MobileTokenObtainPairView(TokenObtainPairView):
             return response
         except Exception as e:
             logger.error(f"Error en login móvil: {str(e)}")
+
+            error_msg = str(e)
+            if "Usuario no existe" in error_msg:
+                return Response(
+                    {"error": "Usuario no existe"}, status=status.HTTP_401_UNAUTHORIZED
+                )
+            elif "Credenciales erroneas" in error_msg:
+                return Response(
+                    {"error": "Credenciales erroneas"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            elif "Usuario inactivo" in error_msg:
+                return Response(
+                    {"error": "Usuario inactivo"}, status=status.HTTP_401_UNAUTHORIZED
+                )
+            elif "Acceso móvil restringido" in error_msg:
+                return Response(
+                    {"error": "Acceso móvil restringido solo para clientes"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
             return Response(
                 {"error": "Error interno del servidor"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -386,6 +566,7 @@ class UsuarioMeView(APIView):
             data = serializer.data
 
             # Log para debugging (solo en desarrollo)
+            # Solo mostrar en modo debug
             if logger.level == logging.DEBUG:
                 logger.debug(f"Datos del usuario serializados: {data}")
 
@@ -409,19 +590,32 @@ class UsuarioMeView(APIView):
 
     def patch(self, request):
         """Actualizar token FCM del usuario"""
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         try:
             fcm_token = request.data.get("fcm_token")
+
             if fcm_token:
                 request.user.fcm_token = fcm_token
                 request.user.save(update_fields=["fcm_token"])
                 logger.info(f"Token FCM actualizado para usuario {request.user.id}")
                 return Response({"message": "Token FCM actualizado correctamente"})
             else:
+                logger.warning(
+                    "[DEBUG PATCH /api/me/] No se recibió fcm_token en el request"
+                )
                 return Response(
                     {"error": "Token FCM requerido"}, status=status.HTTP_400_BAD_REQUEST
                 )
         except Exception as e:
-            logger.error(f"Error actualizando token FCM: {str(e)}")
+            import traceback
+
+            logger.error(
+                f"[DEBUG PATCH /api/me/] Error actualizando token FCM: {str(e)}"
+            )
+            logger.error(f"[DEBUG PATCH /api/me/] Traceback: {traceback.format_exc()}")
             return Response(
                 {"error": "Error interno del servidor"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -496,15 +690,54 @@ def dashboard_stats(request):
         try:
             # Obtener el primer día del mes actual
             first_day_of_month = today.replace(day=1)
-            ingresos_mes = (
+
+            # Ingresos por ventas
+            ingresos_ventas = (
                 Venta.objects.filter(
                     fecha_venta__date__gte=first_day_of_month, eliminado=False
                 ).aggregate(total=Sum("total"))["total"]
                 or 0
             )
+
+            # Ingresos por mantenimientos completados (total + costo_adicional)
+            try:
+                # Buscar mantenimientos completados usando fecha_completado o fecha_entrega
+                # ya que el frontend puede usar cualquiera de los dos campos
+                mantenimientos_query = (
+                    Q(estado="completado")
+                    & (
+                        Q(fecha_completado__date__gte=first_day_of_month)
+                        | Q(fecha_entrega__date__gte=first_day_of_month)
+                    )
+                    & Q(eliminado=False)
+                )
+
+                # Sumar total de mantenimientos completados en el mes
+                mantenimientos_result = Mantenimiento.objects.filter(
+                    mantenimientos_query
+                ).aggregate(
+                    total_mantenimientos=Sum("total"),
+                    total_adicional=Sum("costo_adicional"),
+                )
+                ingresos_mantenimientos = float(
+                    mantenimientos_result["total_mantenimientos"] or 0
+                ) + float(mantenimientos_result["total_adicional"] or 0)
+                # Contar mantenimientos completados
+                mantenimientos_completados_count = Mantenimiento.objects.filter(
+                    mantenimientos_query
+                ).count()
+            except Exception as e:
+                logger.error(f"Error calculando ingresos_mantenimientos: {e}")
+                ingresos_mantenimientos = 0
+                mantenimientos_completados_count = 0
+
+            # Ingreso total del mes = ventas + mantenimientos
+            ingresos_mes = float(ingresos_ventas) + ingresos_mantenimientos
+            ingresos_netos_mes = ingresos_mes
         except Exception as e:
             logger.error(f"Error calculando ingresos_mes: {e}")
             ingresos_mes = 0
+            ingresos_netos_mes = 0
 
         try:
             productos_stock_bajo = Producto.objects.filter(
@@ -523,7 +756,9 @@ def dashboard_stats(request):
             "total_motos": total_motos,
             "mantenimientos_pendientes": mantenimientos_pendientes,
             "ventas_mes": ventas_mes,
+            "mantenimientos_mes": mantenimientos_completados_count,
             "ingresos_mes": float(ingresos_mes),
+            "ingresos_netos_mes": float(ingresos_netos_mes),
             "productos_stock_bajo": productos_stock_bajo,
         }
 
@@ -1885,7 +2120,8 @@ def cliente_ventas(request):
         # Serializar los datos
         from .serializers import VentaSerializer
 
-        serializer = VentaSerializer(ventas, many=True)
+        # Serializar las ventas
+        serializer = VentaSerializer(ventas, many=True, context={"request": request})
 
         logger.info(f"✅ Ventas serializadas correctamente para cliente {cliente.id}")
         return Response(
@@ -1940,7 +2176,10 @@ def cliente_mantenimientos(request):
         # Obtener mantenimientos de las motos del cliente
         mantenimientos = (
             Mantenimiento.objects.filter(moto__propietario=cliente, eliminado=False)
-            .select_related("moto__propietario")
+            .select_related("moto__propietario", "tecnico_asignado", "completado_por")
+            .prefetch_related(
+                "detalles", "detalles__servicio", "repuestos", "repuestos__producto"
+            )
             .order_by("-fecha_ingreso")
         )
 
@@ -1961,7 +2200,9 @@ def cliente_mantenimientos(request):
         # Serializar los datos
         from .serializers import MantenimientoSerializer
 
-        serializer = MantenimientoSerializer(mantenimientos, many=True)
+        serializer = MantenimientoSerializer(
+            mantenimientos, many=True, context={"request": request}
+        )
 
         logger.info(
             f"✅ Mantenimientos serializados correctamente para cliente {cliente.id}"
@@ -2052,7 +2293,9 @@ def cliente_data_completa(request):
         )
 
         motos_data = MotoSerializer(motos, many=True).data
-        mantenimientos_data = MantenimientoSerializer(mantenimientos, many=True).data
+        mantenimientos_data = MantenimientoSerializer(
+            mantenimientos, many=True, context={"request": request}
+        ).data
         compras_data = VentaSerializer(compras, many=True).data
 
         # Datos del perfil
@@ -2119,9 +2362,13 @@ class CambioPasswordView(APIView):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
-    """Vista de login personalizada"""
+    """Vista de login personalizada con protección contra ataques de fuerza bruta"""
     correo = request.data.get("correo_electronico", "").lower().strip()
     password = request.data.get("password")
+
+    # Configuración de seguridad
+    MAX_ATTEMPTS = 5
+    LOCKOUT_MINUTES = 30
 
     if not correo or not password:
         return Response(
@@ -2129,10 +2376,76 @@ def login_view(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    user = authenticate(correo_electronico=correo, password=password)
-    if user and user.is_active:
+    # First check if user exists
+    try:
+        user = Usuario.objects.get(correo_electronico=correo)
+    except Usuario.DoesNotExist:
+        return Response(
+            {"error": "Usuario no existe"}, status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    # Check if account is locked
+    if (
+        hasattr(user, "failed_login_attempts")
+        and user.failed_login_attempts >= MAX_ATTEMPTS
+    ):
+        # Check if lockout period has expired
+        if user.last_failed_login:
+            from django.utils import timezone
+            from datetime import timedelta
+
+            lockout_end = user.last_failed_login + timedelta(minutes=LOCKOUT_MINUTES)
+            if timezone.now() < lockout_end:
+                remaining_minutes = (lockout_end - timezone.now()).seconds // 60
+                return Response(
+                    {
+                        "error": f"Cuenta bloqueada por demasiados intentos fallidos. Intenta en {remaining_minutes} minutos.",
+                        "locked": True,
+                        "remaining_minutes": remaining_minutes,
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            else:
+                # Lockout expired, reset attempts
+                user.failed_login_attempts = 0
+                user.save(update_fields=["failed_login_attempts"])
+
+    # Then check password
+    if not user.check_password(password):
+        # Increment failed login attempts
+        from django.utils import timezone
+
+        user.failed_login_attempts = getattr(user, "failed_login_attempts", 0) + 1
+        user.last_failed_login = timezone.now()
+        user.save(update_fields=["failed_login_attempts", "last_failed_login"])
+
+        attempts_remaining = MAX_ATTEMPTS - user.failed_login_attempts
+
+        if user.failed_login_attempts >= MAX_ATTEMPTS:
+            return Response(
+                {
+                    "error": f"Demasiados intentos fallidos. Tu cuenta ha sido bloqueada por {LOCKOUT_MINUTES} minutos.",
+                    "locked": True,
+                    "lockout_minutes": LOCKOUT_MINUTES,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        else:
+            return Response(
+                {
+                    "error": "Credenciales erroneas",
+                    "attempts_remaining": attempts_remaining,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+    if user.is_active:
+        # Reset failed login attempts on successful login
+        user.failed_login_attempts = 0
+        user.last_failed_login = None
+        user.save(update_fields=["failed_login_attempts", "last_failed_login"])
+
         refresh = RefreshToken.for_user(user)
-        logger.info(f"Login exitoso para: {correo}")
         return Response(
             {
                 "refresh": str(refresh),
@@ -2141,10 +2454,7 @@ def login_view(request):
             }
         )
 
-    logger.warning(f"Intento de login fallido para: {correo}")
-    return Response(
-        {"error": "Credenciales inválidas"}, status=status.HTTP_401_UNAUTHORIZED
-    )
+    return Response({"error": "Usuario inactivo"}, status=status.HTTP_401_UNAUTHORIZED)
 
 
 @api_view(["POST"])
@@ -2269,7 +2579,12 @@ class UsuarioViewSet(viewsets.ModelViewSet):
     """
 
     queryset = (
-        Usuario.objects.select_related("persona_asociada")
+        Usuario.objects.select_related(
+            "persona_asociada",
+            "creado_por__persona_asociada",
+            "actualizado_por__persona_asociada",
+            "eliminado_por__persona_asociada",
+        )
         .prefetch_related("roles__rol")
         .all()
     )
@@ -2386,6 +2701,22 @@ class UsuarioViewSet(viewsets.ModelViewSet):
                 pass  # Ignorar si algún ID no es válido
 
         return queryset
+
+    def perform_create(self, serializer):
+        """Establecer el usuario que crea el registro"""
+        # Guardar pasando el usuario directamente (igual que base)
+        serializer.save(creado_por=self.request.user)
+
+    def perform_update(self, serializer):
+        """Establecer el usuario que actualiza el registro"""
+        # Guardar pasando el usuario directamente (igual que Producto)
+        serializer.save(actualizado_por=self.request.user)
+
+    def perform_destroy(self, instance):
+        """Establecer el usuario que elimina el registro (soft delete)"""
+        # Configurar el usuario actual para que se guarde en eliminado_por
+        instance._current_user = self.request.user
+        instance.delete()
 
     @action(detail=True, methods=["post"])
     def asociar_persona(self, request, pk=None):
@@ -2576,10 +2907,18 @@ class UsuarioViewSet(viewsets.ModelViewSet):
             )
 
             logger.info("Validando serializer...")
+            logger.info(
+                f"🔍 Usuario actual autenticado: ID={self.request.user.id}, username={self.request.user.username}"
+            )
             if serializer.is_valid():
                 logger.info("✓ Serializer válido - Procediendo a guardar")
-                usuario = serializer.save()
+                # Establecer actualizado_por antes de guardar
+                logger.info(f"🔍 Guardando con actualizado_por={self.request.user.id}")
+                usuario = serializer.save(actualizado_por=self.request.user)
                 logger.info(f"✓ Usuario guardado exitosamente: {usuario.username}")
+                logger.info(
+                    f"🔍 Después de guardar - actualizado_por del usuario: {usuario.actualizado_por}"
+                )
 
                 resultado = UsuarioPersonaCompleteSerializer(usuario).data
                 logger.info("=== FIN update_complete EXITOSO ===")
@@ -2609,25 +2948,19 @@ class UsuarioViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            # Debug: mostrar estado antes del cambio
-            print(f"🔍 Cambiando contraseña para: {usuario.correo_electronico}")
-            print(f"Password anterior hash: {usuario.password}")
-            print(f"Nueva contraseña: {new_password}")
-
             # Limpiar y convertir a string
             clean_password = str(new_password).strip()
 
             # Cambiar la contraseña
             usuario.set_password(clean_password)
+            usuario.actualizado_por = self.request.user
             usuario.save()
 
-            # Debug: verificar el cambio
-            usuario.refresh_from_db()  # Recargar desde DB
-            print(f"Password nuevo hash: {usuario.password}")
+            # Verificar el cambio
+            usuario.refresh_from_db()
 
             # Probar la contraseña inmediatamente
             test_check = usuario.check_password(clean_password)
-            print(f"Test password check: {test_check}")
 
             if not test_check:
                 raise Exception("La contraseña no se guardó correctamente")
@@ -2717,7 +3050,8 @@ class UsuarioViewSet(viewsets.ModelViewSet):
             logger.info(f"Estado actual: is_active={usuario.is_active}")
 
             usuario.is_active = not usuario.is_active
-            usuario.save(update_fields=["is_active"])
+            usuario.actualizado_por = self.request.user
+            usuario.save(update_fields=["is_active", "actualizado_por"])
 
             logger.info(f"Nuevo estado: is_active={usuario.is_active}")
             serializer = self.get_serializer(usuario)
@@ -2736,29 +3070,44 @@ class UsuarioViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["patch"])
     def soft_delete(self, request, pk=None):
+        from django.utils import timezone
+
         usuario = self.get_object()
         usuario.eliminado = True
-        usuario.save(update_fields=["eliminado"])
+        usuario.eliminado_por = request.user
+        usuario.fecha_eliminacion = timezone.now()
+        usuario.save(update_fields=["eliminado", "eliminado_por", "fecha_eliminacion"])
         return Response({"status": "soft deleted"}, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["delete"], url_path="hard_delete")
-    def hard_delete(self, request, pk=None):
-        try:
-            usuario = Usuario.objects_all.get(pk=pk)
-            usuario.delete_real()  # elimina físicamente
-            return Response({"success": True}, status=status.HTTP_204_NO_CONTENT)
-        except Usuario.DoesNotExist:
-            return Response(
-                {"error": "Usuario no encontrado"}, status=status.HTTP_404_NOT_FOUND
-            )
 
     @action(detail=True, methods=["patch"])
     def restore(self, request, pk=None):
-        usuario = Usuario.objects.filter(pk=pk).first()
-        if not usuario:
-            return Response({"detail": "Usuario no encontrado"}, status=404)
+        # Usar get_object() para mantener consistencia con permisos
+        # pero obtener el objeto incluyendo los eliminados
+        # Primero intentamos con el objeto normal
+        try:
+            usuario = self.get_object()
+        except Http404:
+            # Si no se encuentra en el queryset normal, buscar incluyendo eliminados
+            usuario = Usuario.objects.filter(pk=pk).first()
+            if not usuario:
+                return Response({"detail": "Usuario no encontrado"}, status=404)
+            # Verificar que el usuario estaba eliminado
+            if not usuario.eliminado:
+                return Response({"detail": "El usuario no está eliminado"}, status=400)
+
+        # Restaurar el usuario
         usuario.eliminado = False
-        usuario.save()
+        usuario.eliminado_por = None
+        usuario.fecha_eliminacion = None
+        usuario.actualizado_por = request.user
+        usuario.save(
+            update_fields=[
+                "eliminado",
+                "eliminado_por",
+                "fecha_eliminacion",
+                "actualizado_por",
+            ]
+        )
         return Response(self.get_serializer(usuario).data)
 
 
@@ -2793,10 +3142,12 @@ class UsuarioRolViewSet(BaseViewSet):
 class CategoriaViewSet(BaseViewSet):
     """ViewSet optimizado para Categorías de Productos"""
 
-    queryset = Categoria.objects.all()
+    queryset = Categoria.objects_all.select_related(
+        "creado_por", "actualizado_por", "eliminado_por"
+    ).all()
     serializer_class = CategoriaSerializer
     search_fields = ["nombre", "descripcion"]
-    filterset_fields = ["activo", "eliminado"]
+    filterset_fields = ["activo"]
     ordering = ["nombre"]
 
     def get_permissions(self):
@@ -2804,11 +3155,127 @@ class CategoriaViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore", "toggle_activo"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsAdministrador]
         return [permission() for permission in permission_classes]
+
+    @action(detail=True, methods=["patch"], url_path="soft_delete")
+    def soft_delete(self, request, pk=None):
+        """Soft delete con validación de productos relacionados"""
+        from django.db.models import Count
+
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría no encontrada"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Verificar si hay productos activos relacionados
+        productos_count = Producto.objects.filter(
+            categoria=categoria, eliminado=False
+        ).count()
+
+        if productos_count > 0:
+            return Response(
+                {
+                    "detail": f"No se puede eliminar la categoría '{categoria.nombre}' porque tiene {productos_count} producto(s) relacionado(s). Elimine o reasigne los productos primero."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verificar si hay productos eliminados también (opcional)
+        productos_eliminados = Producto.objects.filter(
+            categoria=categoria, eliminado=True
+        ).count()
+
+        # Proceder con el soft delete
+        from django.utils import timezone
+
+        categoria.eliminado = True
+        categoria.fecha_eliminacion = timezone.now()
+        if hasattr(categoria, "eliminado_por") and request.user.is_authenticated:
+            categoria.eliminado_por = request.user
+        categoria.save(
+            update_fields=["eliminado", "fecha_eliminacion", "eliminado_por"]
+        )
+
+        return Response(
+            {"status": "Categoría marcada como eliminada"}, status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=["patch"], url_path="toggle_activo")
+    def toggle_activo(self, request, pk=None):
+        """Toggle activo con validación de productos relacionados"""
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría no encontrada"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        nuevo_estado = request.data.get("activo") if request.data else None
+
+        # Si se va a desactivar, verificar productos activos
+        if nuevo_estado is False or (nuevo_estado is None and categoria.activo):
+            productos_activos = Producto.objects.filter(
+                categoria=categoria, activo=True, eliminado=False
+            ).count()
+
+            if productos_activos > 0:
+                return Response(
+                    {
+                        "detail": f"No se puede desactivar la categoría '{categoria.nombre}' porque tiene {productos_activos} producto(s) activo(s). Desactive los productos primero."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Proceder con el toggle
+        if nuevo_estado is not None:
+            categoria.activo = bool(nuevo_estado)
+        else:
+            categoria.activo = not categoria.activo
+        categoria.save(update_fields=["activo"])
+
+        serializer = self.get_serializer(categoria)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"])
+    def verificar_relaciones(self, request, pk=None):
+        """Verifica si la categoría tiene productos o servicios relacionados"""
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría no encontrada"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Contar productos relacionados
+        productos_count = Producto.objects.filter(
+            categoria=categoria, eliminado=False
+        ).count()
+
+        productos_eliminados_count = Producto.objects.filter(
+            categoria=categoria, eliminado=True
+        ).count()
+
+        return Response(
+            {
+                "categoria_id": categoria.id,
+                "categoria_nombre": categoria.nombre,
+                "productos_activos": productos_count,
+                "productos_eliminados": productos_eliminados_count,
+                "puede_eliminar": productos_count == 0,
+                "puede_desactivar": productos_count == 0,
+                "mensaje": (
+                    f"La categoría tiene {productos_count} producto(s) activo(s) relacionado(s)"
+                    if productos_count > 0
+                    else "La categoría no tiene productos relacionados"
+                ),
+            }
+        )
 
     @action(detail=True, methods=["get"])
     def productos(self, request, pk=None):
@@ -2856,10 +3323,12 @@ class CategoriaPublicaViewSet(viewsets.ReadOnlyModelViewSet):
 class CategoriaServicioViewSet(BaseViewSet):
     """ViewSet optimizado para Categorías de Servicios"""
 
-    queryset = CategoriaServicio.objects.all()
+    queryset = CategoriaServicio.objects_all.select_related(
+        "creado_por", "actualizado_por", "eliminado_por"
+    ).all()
     serializer_class = CategoriaServicioSerializer
     search_fields = ["nombre", "descripcion"]
-    filterset_fields = ["activo", "eliminado"]
+    filterset_fields = ["activo"]
     ordering = ["nombre"]
 
     def get_permissions(self):
@@ -2867,11 +3336,130 @@ class CategoriaServicioViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsAdministrador]
         return [permission() for permission in permission_classes]
+
+    @action(detail=True, methods=["patch"], url_path="soft_delete")
+    def soft_delete(self, request, pk=None):
+        """Soft delete con validación de servicios relacionados"""
+        from ..models import Servicio
+
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría de servicio no encontrada"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Verificar si hay servicios activos relacionados
+        servicios_count = Servicio.objects.filter(
+            categoria_servicio=categoria, eliminado=False
+        ).count()
+
+        if servicios_count > 0:
+            return Response(
+                {
+                    "detail": f"No se puede eliminar la categoría '{categoria.nombre}' porque tiene {servicios_count} servicio(s) relacionado(s). Elimine o reasigne los servicios primero."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Proceder con el soft delete
+        from django.utils import timezone
+
+        categoria.eliminado = True
+        categoria.fecha_eliminacion = timezone.now()
+        if hasattr(categoria, "eliminado_por") and request.user.is_authenticated:
+            categoria.eliminado_por = request.user
+        categoria.save(
+            update_fields=["eliminado", "fecha_eliminacion", "eliminado_por"]
+        )
+
+        return Response(
+            {"status": "Categoría de servicio marcada como eliminada"},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"])
+    def verificar_relaciones(self, request, pk=None):
+        """Verifica si la categoría de servicio tiene servicios relacionados"""
+        from ..models import Servicio
+
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría de servicio no encontrada"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Contar servicios relacionados
+        servicios_count = Servicio.objects.filter(
+            categoria_servicio=categoria, eliminado=False
+        ).count()
+
+        servicios_eliminados_count = Servicio.objects.filter(
+            categoria_servicio=categoria, eliminado=True
+        ).count()
+
+        return Response(
+            {
+                "categoria_id": categoria.id,
+                "categoria_nombre": categoria.nombre,
+                "servicios_activos": servicios_count,
+                "servicios_eliminados": servicios_eliminados_count,
+                "puede_eliminar": servicios_count == 0,
+                "puede_desactivar": servicios_count == 0,
+                "mensaje": (
+                    f"La categoría tiene {servicios_count} servicio(s) activo(s) relacionado(s)"
+                    if servicios_count > 0
+                    else "La categoría no tiene servicios relacionados"
+                ),
+            }
+        )
+
+    @action(detail=True, methods=["patch"], url_path="toggle_activo")
+    def toggle_activo(self, request, pk=None):
+        """Toggle activo con validación de servicios relacionados"""
+        from ..models import Servicio
+
+        try:
+            categoria = self.get_object()
+        except Http404:
+            return Response(
+                {"detail": "Categoría de servicio no encontrada"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        nuevo_estado = request.data.get("activo")
+
+        # Si se va a desactivar, verificar servicios activos
+        if nuevo_estado is False or (nuevo_estado is None and categoria.activo):
+            servicios_activos = Servicio.objects.filter(
+                categoria_servicio=categoria, activo=True, eliminado=False
+            ).count()
+
+            if servicios_activos > 0:
+                return Response(
+                    {
+                        "detail": f"No se puede desactivar la categoría '{categoria.nombre}' porque tiene {servicios_activos} servicio(s) activo(s). Desactive los servicios primero."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Proceder con el toggle
+        if nuevo_estado is not None:
+            categoria.activo = bool(nuevo_estado)
+        else:
+            categoria.activo = not categoria.activo
+        categoria.save(update_fields=["activo"])
+
+        serializer = self.get_serializer(categoria)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 # =======================================
@@ -2880,10 +3468,14 @@ class CategoriaServicioViewSet(BaseViewSet):
 class ProveedorViewSet(BaseViewSet):
     """ViewSet optimizado para Proveedores"""
 
-    queryset = Proveedor.objects.all()
+    queryset = Proveedor.objects_all.select_related(
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+        "eliminado_por__persona_asociada",
+    ).all()
     serializer_class = ProveedorSerializer
     search_fields = ["nombre", "nit", "correo", "telefono", "contacto_principal"]
-    filterset_fields = ["activo", "eliminado"]
+    filterset_fields = ["activo"]
     ordering = ["nombre"]
 
     def get_permissions(self):
@@ -2891,7 +3483,7 @@ class ProveedorViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsAdministrador]
@@ -2938,26 +3530,74 @@ class ProveedorViewSet(BaseViewSet):
 class ProductoViewSet(BaseViewSet):
     """ViewSet optimizado para Productos"""
 
-    queryset = Producto.objects.select_related("categoria", "proveedor").all()
+    queryset = Producto.objects_all.select_related(
+        "categoria",
+        "proveedor",
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+        "eliminado_por__persona_asociada",
+    ).all()
     serializer_class = ProductoSerializer
     search_fields = ["nombre", "codigo", "descripcion"]
-    filterset_fields = ["categoria", "proveedor", "activo", "eliminado", "destacado"]
+    filterset_fields = ["categoria", "proveedor", "activo", "destacado"]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     ordering = ["-fecha_registro"]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        queryset = super().get_queryset()
 
         # Filtro específico para técnicos - solo productos usados en sus mantenimientos
         if IsTecnico().has_permission(
             self.request, self
         ) and not IsAdministrador().has_permission(self.request, self):
-            qs = qs.filter(
+            queryset = queryset.filter(
                 repuestos_usados__mantenimiento__tecnico_asignado=self.request.user
             ).distinct()
-            return qs
+            return queryset
 
-        return qs
+        # -------------------------
+        # Filtro por 'eliminado' - Similar a UsuarioViewSet
+        # -------------------------
+        eliminado_param = self.request.query_params.get("eliminado", None)
+        if eliminado_param is not None:
+            if eliminado_param.lower() == "true":
+                queryset = queryset.filter(eliminado=True)
+            elif eliminado_param.lower() == "false":
+                queryset = queryset.filter(eliminado=False)
+            elif eliminado_param.lower() == "all":
+                pass  # No aplicar filtro, mostrar todos
+            else:
+                # Valor por defecto: mostrar solo no eliminados
+                queryset = queryset.filter(eliminado=False)
+        else:
+            # VALOR POR DEFECTO: mostrar solo productos NO eliminados
+            queryset = queryset.filter(eliminado=False)
+
+        # -------------------------
+        # Filtro por 'activo' - Exactamente como UsuarioViewSet
+        # -------------------------
+        activo_param = self.request.query_params.get("activo", None)
+        if activo_param is not None:
+            if activo_param.lower() == "true":
+                queryset = queryset.filter(activo=True)
+            elif activo_param.lower() == "false":
+                queryset = queryset.filter(activo=False)
+        else:
+            # VALOR POR DEFECTO: mostrar solo productos ACTIVOS (como UsuarioViewSet)
+            queryset = queryset.filter(activo=True)
+
+        # -------------------------
+        # Filtros opcionales desde query params
+        # -------------------------
+        search = self.request.query_params.get("search", None)
+        if search:
+            queryset = queryset.filter(
+                models.Q(nombre__icontains=search)
+                | models.Q(codigo__icontains=search)
+                | models.Q(descripcion__icontains=search)
+            ).distinct()
+
+        return queryset
 
     def get_permissions(self):
         # Usar CustomPermission para todas las acciones
@@ -2985,8 +3625,13 @@ class ProductoViewSet(BaseViewSet):
         stock_inicial = serializer.validated_data.pop("stock_inicial", 0)
         stock_minimo = serializer.validated_data.pop("stock_minimo", 0)
 
-        # Crear el producto
-        producto = serializer.save()
+        # Establecer el usuario que crea el registro
+        usuario_actual = (
+            self.request.user if self.request.user.is_authenticated else None
+        )
+
+        # Crear el producto con el usuario creador
+        producto = serializer.save(creado_por=usuario_actual)
 
         # Crear inventario con stock inicial
         inventario, created = Inventario.objects.get_or_create(
@@ -2994,6 +3639,7 @@ class ProductoViewSet(BaseViewSet):
             defaults={
                 "stock_actual": stock_inicial,
                 "stock_minimo": stock_minimo,
+                "creado_por": usuario_actual,
             },
         )
 
@@ -3004,19 +3650,23 @@ class ProductoViewSet(BaseViewSet):
                 tipo="entrada",
                 cantidad=stock_inicial,
                 motivo=f"Stock inicial del producto {producto.nombre}",
-                usuario=(
-                    self.request.user if self.request.user.is_authenticated else None
-                ),
+                usuario=usuario_actual,
+                creado_por=usuario_actual,
             )
 
         logger.info(
-            f"Producto {producto.id} creado con inventario automático. Stock inicial: {stock_inicial}, Stock mínimo: {stock_minimo}"
+            f"Producto {producto.id} creado con inventario automático por usuario {usuario_actual}. Stock inicial: {stock_inicial}, Stock mínimo: {stock_minimo}"
         )
 
     def perform_update(self, serializer):
         """Actualizar producto - el stock se maneja desde inventario"""
+        # Establecer el usuario que actualiza el registro
+        usuario_actual = (
+            self.request.user if self.request.user.is_authenticated else None
+        )
+
         # Guardar el producto actualizado
-        producto = serializer.save()
+        producto = serializer.save(actualizado_por=usuario_actual)
 
         # Asegurar que existe inventario para el producto
         inventario, created = Inventario.objects.get_or_create(
@@ -3024,6 +3674,7 @@ class ProductoViewSet(BaseViewSet):
             defaults={
                 "stock_actual": 0,
                 "stock_minimo": 0,
+                "creado_por": usuario_actual,
             },
         )
 
@@ -3063,6 +3714,38 @@ class ProductoViewSet(BaseViewSet):
             return self.get_paginated_response(serializer.data)
 
         serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["patch"])
+    def restore(self, request, pk=None):
+        """Restaurar producto eliminado (similar a UsuarioViewSet)"""
+        # Usar objects_all para poder encontrar registros eliminados
+        producto = Producto.objects_all.filter(pk=pk).first()
+        if not producto:
+            return Response({"detail": "Producto no encontrado"}, status=404)
+        producto.eliminado = False
+        producto.eliminado_por = None
+        producto.fecha_eliminacion = None
+        producto.save(update_fields=["eliminado", "eliminado_por", "fecha_eliminacion"])
+        return Response(self.get_serializer(producto).data)
+
+    @action(detail=True, methods=["patch"], url_path="toggle_activo")
+    def toggle_activo(self, request, pk=None):
+        """Alternar estado activo/inactivo del producto"""
+        # Usar objects_all para poder encontrar productos activos o inactivos
+        # Similar a como funciona en toggle_user_status
+        producto = Producto.objects_all.filter(pk=pk).first()
+        if not producto:
+            return Response({"detail": "Producto no encontrado"}, status=404)
+
+        logger.info(f"🔹 toggle_activo llamado para producto ID={pk}")
+        logger.info(f"Estado actual: activo={producto.activo}")
+
+        producto.activo = not producto.activo
+        producto.save(update_fields=["activo"])
+
+        logger.info(f"Nuevo estado: activo={producto.activo}")
+        serializer = self.get_serializer(producto)
         return Response(serializer.data)
 
     @action(detail=True, methods=["patch"])
@@ -3191,7 +3874,12 @@ class ProductoPublicoViewSet(viewsets.ReadOnlyModelViewSet):
 class ServicioViewSet(BaseViewSet):
     """ViewSet optimizado para Servicios"""
 
-    queryset = Servicio.objects.select_related("categoria_servicio").all()
+    queryset = Servicio.objects_all.select_related(
+        "categoria_servicio",
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+        "eliminado_por__persona_asociada",
+    ).all()
     serializer_class = ServicioSerializer
     search_fields = ["nombre", "descripcion"]
     filterset_fields = ["categoria_servicio", "activo", "eliminado"]
@@ -3209,6 +3897,47 @@ class ServicioViewSet(BaseViewSet):
             ).distinct()
             return qs
 
+        # -------------------------
+        # Filtro por 'eliminado' - Similar a ProductoViewSet
+        # -------------------------
+        eliminado_param = self.request.query_params.get("eliminado", None)
+        if eliminado_param is not None:
+            if eliminado_param.lower() == "true":
+                qs = qs.filter(eliminado=True)
+            elif eliminado_param.lower() == "false":
+                qs = qs.filter(eliminado=False)
+            elif eliminado_param.lower() == "all":
+                pass  # No aplicar filtro, mostrar todos
+            else:
+                # Valor por defecto: mostrar solo no eliminados
+                qs = qs.filter(eliminado=False)
+        else:
+            # VALOR POR DEFECTO: mostrar solo servicios NO eliminados
+            qs = qs.filter(eliminado=False)
+
+        # -------------------------
+        # Filtro por 'activo' - Exactamente como ProductoViewSet
+        # -------------------------
+        activo_param = self.request.query_params.get("activo", None)
+        if activo_param is not None:
+            if activo_param.lower() == "true":
+                qs = qs.filter(activo=True)
+            elif activo_param.lower() == "false":
+                qs = qs.filter(activo=False)
+        else:
+            # VALOR POR DEFECTO: mostrar solo servicios ACTIVOS
+            qs = qs.filter(activo=True)
+
+        # -------------------------
+        # Filtros opcionales desde query params
+        # -------------------------
+        search = self.request.query_params.get("search", None)
+        if search:
+            qs = qs.filter(
+                models.Q(nombre__icontains=search)
+                | models.Q(descripcion__icontains=search)
+            ).distinct()
+
         return qs
 
     def get_permissions(self):
@@ -3216,11 +3945,37 @@ class ServicioViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsAdministrador]
         return [permission() for permission in permission_classes]
+
+    @action(detail=True, methods=["patch"], url_path="toggle_activo")
+    def toggle_activo(self, request, pk=None):
+        """Alternar estado activo/inactivo del servicio"""
+        # Usar objects_all para poder encontrar servicios activos o inactivos
+        from ..models import Servicio
+
+        servicio = Servicio.objects_all.filter(pk=pk).first()
+        if not servicio:
+            return Response({"detail": "Servicio no encontrado"}, status=404)
+
+        logger.info(f"🔹 toggle_activo llamado para servicio ID={pk}")
+        logger.info(f"Estado actual: activo={servicio.activo}")
+
+        # Si se proporciona activo en el request, usarlo; de lo contrario, togglear
+        activo_value = request.data.get("activo")
+        if activo_value is not None:
+            servicio.activo = bool(activo_value)
+        else:
+            servicio.activo = not servicio.activo
+
+        servicio.save(update_fields=["activo"])
+
+        logger.info(f"Nuevo estado: activo={servicio.activo}")
+        serializer = self.get_serializer(servicio)
+        return Response(serializer.data)
 
 
 # =======================================
@@ -3229,11 +3984,38 @@ class ServicioViewSet(BaseViewSet):
 class MotoViewSet(BaseViewSet):
     """ViewSet optimizado para Motos"""
 
-    queryset = Moto.objects_all.select_related("propietario", "registrado_por").all()
+    queryset = Moto.objects_all.select_related(
+        "propietario",
+        "registrado_por",
+        "creado_por",
+        "actualizado_por",
+        "eliminado_por",
+    ).all()
     serializer_class = MotoSerializer
     search_fields = ["placa", "marca", "modelo", "numero_chasis", "numero_motor"]
-    filterset_fields = ["propietario", "marca", "activo", "eliminado"]
+    filterset_fields = ["propietario", "marca", "activo"]
     ordering = ["-fecha_registro"]
+
+    def create(self, request, *args, **kwargs):
+        logger = logging.getLogger(__name__)
+
+        logger.info("=== DEBUG MOTO: Creando nueva moto ===")
+        logger.info(
+            f"DEBUG MOTO: Usuario: {request.user.username} (ID: {request.user.id})"
+        )
+        logger.info(f"DEBUG MOTO: request.data = {request.data}")
+
+        serializer = self.get_serializer(data=request.data)
+
+        if not serializer.is_valid():
+            logger.error(f"❌ ERRORES SERIALIZER: {serializer.errors}")
+            return Response(serializer.errors, status=400)
+
+        self.perform_create(serializer)
+
+        headers = self.get_success_headers(serializer.data)
+
+        return Response(serializer.data, status=201, headers=headers)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -3261,7 +4043,7 @@ class MotoViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsCliente | IsTecnico | IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsTecnico | IsEmpleado | IsAdministrador]
@@ -3269,29 +4051,89 @@ class MotoViewSet(BaseViewSet):
 
     def perform_create(self, serializer):
         """Asignar automáticamente el propietario para clientes"""
-        if IsCliente().has_permission(self.request, self) and hasattr(
-            self.request.user, "persona_asociada"
-        ):
-            # Para clientes, asignar automáticamente su persona_asociada como propietario
+        logger = logging.getLogger(__name__)
+
+        is_cliente = IsCliente().has_permission(self.request, self)
+        has_persona = (
+            hasattr(self.request.user, "persona_asociada")
+            and self.request.user.persona_asociada
+        )
+
+        # Verificar si el serializer ya tiene un propietario en validated_data
+        # (enviado desde el frontend)
+        tiene_propietario_en_data = (
+            hasattr(serializer, "validated_data")
+            and "propietario" in serializer.validated_data
+        )
+
+        logger.info(
+            f"DEBUG PERFORM_CREATE: IsCliente={is_cliente}, has_persona={has_persona}, tiene_propietario_en_data={tiene_propietario_en_data}"
+        )
+        if tiene_propietario_en_data:
+            logger.info(
+                f"DEBUG PERFORM_CREATE: Propietario en validated_data: {serializer.validated_data.get('propietario')}"
+            )
+
+        # Si es cliente Y tiene persona Y NO envió propietario explícitamente
+        # -> usar su propia persona como propietario
+        # Si envió propietario -> usar el que envió (respetar selección del usuario)
+        if is_cliente and has_persona and not tiene_propietario_en_data:
+            # Para clientes sin propietario enviado, asignar automáticamente su persona_asociada
+            logger.info(
+                f"DEBUG PERFORM_CREATE: Asignando propietario desde persona_asociada: {self.request.user.persona_asociada.id}"
+            )
             serializer.save(
                 propietario=self.request.user.persona_asociada,
                 registrado_por=self.request.user,
+                creado_por=self.request.user,
             )
         else:
-            # Para otros roles, usar el propietario especificado en los datos
-            serializer.save(registrado_por=self.request.user)
+            # Para otros roles O si el usuario envió propietario explícitamente
+            # Usar los datos del serializer (incluye propietario si se envió)
+            logger.info(
+                f"DEBUG PERFORM_CREATE: Usando validated_data del serializer (propietario enviado desde frontend)"
+            )
+            serializer.save(
+                registrado_por=self.request.user,
+                creado_por=self.request.user,
+            )
 
 
 # =======================================
 # MANTENIMIENTO VIEWSETS
 # =======================================
 class MantenimientoViewSet(BaseViewSet):
-    """ViewSet optimizado para Mantenimientos"""
+    """
+    ViewSet optimizado para Mantenimientos.
 
-    queryset = Mantenimiento.objects.select_related("moto__propietario").all()
+    Endpoints disponibles:
+    - GET /: Listar mantenimientos
+    - POST /: Crear mantenimiento
+    - GET /{id}/: Ver detalle
+    - PATCH /{id}/: Actualizar mantenimiento
+    - DELETE /{id}/: Eliminar (soft delete)
+    - POST /{id}/completar/: Completar mantenimiento
+    - POST /{id}/agregar_servicio/: Agregar servicio
+    - POST /{id}/agregar_repuesto/: Agregar repuesto
+    - POST /{id}/quitar_servicio/{detalle_id}/: Quitar servicio
+    - POST /{id}/quitar_repuesto/{repuesto_id}/: Quitar repuesto
+    - GET /{id}/resumen/: Obtener resumen completo
+    """
+
+    queryset = (
+        Mantenimiento.objects.select_related(
+            "moto__propietario",
+            "tecnico_asignado",
+            "completado_por",
+            "creado_por",
+            "actualizado_por",
+        )
+        .prefetch_related("detalles__servicio", "repuestos__producto")
+        .all()
+    )
     serializer_class = MantenimientoSerializer
     search_fields = ["descripcion_problema", "diagnostico"]
-    filterset_fields = ["moto", "estado", "eliminado"]
+    filterset_fields = ["moto", "estado", "tipo", "prioridad"]
     ordering = ["-fecha_ingreso"]
 
     def get_queryset(self):
@@ -3314,6 +4156,24 @@ class MantenimientoViewSet(BaseViewSet):
                 qs = qs.none()
             return qs
 
+        # -------------------------
+        # Filtro por 'eliminado' - Igual que otros ViewSets
+        # -------------------------
+        eliminado_param = self.request.query_params.get("eliminado", None)
+        if eliminado_param is not None:
+            if eliminado_param.lower() == "true":
+                qs = qs.filter(eliminado=True)
+            elif eliminado_param.lower() == "false":
+                qs = qs.filter(eliminado=False)
+            elif eliminado_param.lower() == "all":
+                pass  # No aplicar filtro, mostrar todos
+            else:
+                # Valor por defecto: mostrar solo no eliminados
+                qs = qs.filter(eliminado=False)
+        else:
+            # VALOR POR DEFECTO: mostrar solo mantenimientos NO eliminados
+            qs = qs.filter(eliminado=False)
+
         # Para empleados y administradores - todos los mantenimientos
         return qs
 
@@ -3322,34 +4182,235 @@ class MantenimientoViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsTecnico | IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "hard_delete"]:
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
-        elif self.action in ["cambiar_estado", "agregar_observaciones"]:
+        elif self.action in [
+            "completar",
+            "agregar_servicio",
+            "agregar_repuesto",
+            "quitar_servicio",
+            "quitar_repuesto",
+            "resumen",
+        ]:
             permission_classes = [IsTecnico | IsAdministrador]
         else:
             permission_classes = [IsTecnico | IsEmpleado | IsAdministrador]
         return [permission() for permission in permission_classes]
 
+    @action(detail=True, methods=["post"])
+    def completar(self, request, pk=None):
+        """
+        Completa un mantenimiento.
+
+        Params:
+        - kilometraje_salida: (opcional) Kilometraje al salir la moto
+        """
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+        kilometraje_salida = request.data.get("kilometraje_salida")
+
+        resultado = MantenimientoService.completar_mantenimiento(
+            mantenimiento=mantenimiento,
+            usuario=request.user,
+            kilometraje_salida=kilometraje_salida,
+        )
+
+        if not resultado["success"]:
+            return Response(
+                {"error": resultado["message"]}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = self.get_serializer(resultado["mantenimiento"])
+        return Response(
+            {"message": resultado["message"], "mantenimiento": serializer.data}
+        )
+
+    @action(detail=True, methods=["post"])
+    def agregar_servicio(self, request, pk=None):
+        """
+        Agrega un servicio a un mantenimiento.
+
+        Body:
+        {
+            "servicio": id,
+            "precio": decimal,
+            "observaciones": string,
+            "tipo_aceite": string (optional),
+            "km_proximo_cambio": int (optional)
+        }
+        """
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+
+        # Validar que el mantenimiento no esté completado
+        if mantenimiento.estado == "completado":
+            return Response(
+                {"error": "No se puede modificar un mantenimiento completado"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            detalle = MantenimientoService.agregar_servicio(mantenimiento, request.data)
+            return Response(
+                {
+                    "message": "Servicio agregado correctamente",
+                    "detalle": DetalleMantenimientoSerializer(detalle).data,
+                    "total_actualizado": float(mantenimiento.total),
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except ValidationError as e:
+            return Response(
+                {
+                    "error": (
+                        str(e.message_dict) if hasattr(e, "message_dict") else str(e)
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=["post"])
+    def agregar_repuesto(self, request, pk=None):
+        """
+        Agrega un repuesto a un mantenimiento.
+
+        Body:
+        {
+            "producto": id,
+            "cantidad": int,
+            "precio_unitario": decimal,
+            "permitir_sin_stock": bool (optional)
+        }
+        """
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+
+        # Validar que el mantenimiento no esté completado
+        if mantenimiento.estado == "completado":
+            return Response(
+                {"error": "No se puede modificar un mantenimiento completado"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            repuesto = MantenimientoService.agregar_repuesto(
+                mantenimiento, request.data, validar_stock=True
+            )
+            return Response(
+                {
+                    "message": "Repuesto agregado correctamente",
+                    "repuesto": RepuestoMantenimientoSerializer(repuesto).data,
+                    "total_actualizado": float(mantenimiento.total),
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except ValidationError as e:
+            return Response(
+                {
+                    "error": (
+                        str(e.message_dict) if hasattr(e, "message_dict") else str(e)
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"quitar_servicio/(?P<detalle_id>[^/.]+)",
+    )
+    def quitar_servicio(self, request, pk=None, detalle_id=None):
+        """Elimina un servicio del mantenimiento"""
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+
+        # Validar que el mantenimiento no esté completado
+        if mantenimiento.estado == "completado":
+            return Response(
+                {"error": "No se puede modificar un mantenimiento completado"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        resultado = MantenimientoService.eliminar_servicio(detalle_id)
+
+        if not resultado["success"]:
+            return Response(
+                {"error": resultado["message"]}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Recargar mantenimiento para obtener el total actualizado
+        mantenimiento.refresh_from_db()
+        return Response(
+            {
+                "message": resultado["message"],
+                "total_actualizado": float(mantenimiento.total),
+            }
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"quitar_repuesto/(?P<repuesto_id>[^/.]+)",
+    )
+    def quitar_repuesto(self, request, pk=None, repuesto_id=None):
+        """Elimina un repuesto del mantenimiento y restaura el stock"""
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+
+        # Validar que el mantenimiento no esté completado
+        if mantenimiento.estado == "completado":
+            return Response(
+                {"error": "No se puede modificar un mantenimiento completado"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        resultado = MantenimientoService.eliminar_repuesto(repuesto_id)
+
+        if not resultado["success"]:
+            return Response(
+                {"error": resultado["message"]}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Recargar mantenimiento para obtener el total actualizado
+        mantenimiento.refresh_from_db()
+        return Response(
+            {
+                "message": resultado["message"],
+                "total_actualizado": float(mantenimiento.total),
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def resumen(self, request, pk=None):
+        """Obtiene un resumen completo del mantenimiento"""
+        from core.services import MantenimientoService
+
+        mantenimiento = self.get_object()
+        resumen = MantenimientoService.obtener_resumen_mantenimiento(mantenimiento)
+        return Response(resumen)
+
     @action(detail=True, methods=["patch"])
     def cambiar_estado(self, request, pk=None):
-        """Endpoint específico para técnicos para cambiar estado del mantenimiento"""
+        """
+        Endpoint específico para técnicos para cambiar estado del mantenimiento.
+
+        Flujo obligatorio: pendiente -> en_proceso -> completado
+        """
+        from core.services import MantenimientoService
+
         mantenimiento = self.get_object()
         nuevo_estado = request.data.get("estado")
 
         # Validar que el estado sea válido
-        estados_validos = ["pendiente", "en_proceso", "completado"]
+        estados_validos = ["pendiente", "en_proceso", "completado", "cancelado"]
         if nuevo_estado not in estados_validos:
             return Response(
                 {"error": f"Estado inválido. Estados válidos: {estados_validos}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Validar transiciones de estado
-        if mantenimiento.estado == "completado":
-            return Response(
-                {
-                    "error": "No se puede cambiar el estado de un mantenimiento completado"
-                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3365,11 +4426,20 @@ class MantenimientoViewSet(BaseViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        mantenimiento.estado = nuevo_estado
-        mantenimiento.save(update_fields=["estado"])
+        # Usar el servicio para cambiar estado
+        resultado = MantenimientoService.cambiar_estado(
+            mantenimiento, nuevo_estado, request.user
+        )
 
-        serializer = self.get_serializer(mantenimiento)
-        return Response(serializer.data)
+        if not resultado["success"]:
+            return Response(
+                {"error": resultado["message"]}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = self.get_serializer(resultado["mantenimiento"])
+        return Response(
+            {"message": resultado["message"], "mantenimiento": serializer.data}
+        )
 
     @action(detail=True, methods=["patch"])
     def agregar_observaciones(self, request, pk=None):
@@ -3401,12 +4471,281 @@ class MantenimientoViewSet(BaseViewSet):
         serializer = self.get_serializer(mantenimiento)
         return Response(serializer.data)
 
+    # =======================================
+    # ENDPOINTS PARA SOFT DELETE AVANZADO
+    # =======================================
+    @action(detail=False, methods=["get"])
+    def eliminados(self, request):
+        """
+        Lista todos los mantenimientos eliminados (soft delete).
+        GET /mantenimientos/eliminados/
+        """
+        from django.utils import timezone
+
+        # Usar objects_all para incluir eliminados
+        queryset = (
+            Mantenimiento.objects_all.select_related(
+                "moto__propietario", "tecnico_asignado"
+            )
+            .filter(eliminado=True)
+            .order_by("-fecha_eliminacion")
+        )
+
+        # Filtrar por permisos
+        if IsTecnico().has_permission(
+            request, self
+        ) and not IsAdministrador().has_permission(request, self):
+            queryset = queryset.filter(tecnico_asignado=request.user)
+        elif IsCliente().has_permission(
+            request, self
+        ) and not IsAdministrador().has_permission(request, self):
+            if hasattr(request.user, "persona_asociada"):
+                queryset = queryset.filter(
+                    moto__propietario=request.user.persona_asociada
+                )
+            else:
+                queryset = queryset.none()
+
+        # Paginación
+        from core.api.pagination import StandardResultsSetPagination
+
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["delete"])
+    def eliminar_permanente(self, request, pk=None):
+        """
+        Elimina permanentemente un mantenimiento (hard delete).
+        DELETE /mantenimientos/{id}/eliminar_permanente/
+        """
+        try:
+            mantenimiento = Mantenimiento.objects_all.get(pk=pk)
+        except Mantenimiento.DoesNotExist:
+            return Response(
+                {"detail": "Mantenimiento no encontrado"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Verificar permisos (solo administrador)
+        if not IsAdministrador().has_permission(request, self):
+            return Response(
+                {"error": "No tienes permiso para eliminar permanentemente"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Eliminar detalles asociados
+        mantenimiento.detalles.all().delete()
+        mantenimiento.repuestos.all().delete()
+
+        # Eliminar permanentemente
+        mantenimiento.delete(force_delete=True)
+
+        return Response(
+            {"message": "Mantenimiento eliminado permanentemente"},
+            status=status.HTTP_204_NO_CONTENT,
+        )
+
+    @action(detail=False, methods=["get"])
+    def estadisticas(self, request):
+        """
+        Obtiene estadísticas de mantenimientos.
+        GET /mantenimientos/estadisticas/
+        """
+        from django.db.models import Count, Sum, Avg, Q
+        from django.utils import timezone
+        from datetime import timedelta
+
+        # Solo empleados y administradores pueden ver estadísticas
+        if not (
+            IsEmpleado().has_permission(request, self)
+            or IsAdministrador().has_permission(request, self)
+        ):
+            return Response(
+                {"error": "No tienes permiso para ver estadísticas"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Calcular fechas
+        ahora = timezone.now()
+        hace_30_dias = ahora - timedelta(days=30)
+        hace_7_dias = ahora - timedelta(days=7)
+
+        # Filtrar queryset base según permisos
+        queryset = Mantenimiento.objects_all.all()
+        if IsTecnico().has_permission(
+            request, self
+        ) and not IsAdministrador().has_permission(request, self):
+            queryset = queryset.filter(tecnico_asignado=request.user)
+        elif IsCliente().has_permission(
+            request, self
+        ) and not IsAdministrador().has_permission(request, self):
+            if hasattr(request.user, "persona_asignada"):
+                queryset = queryset.filter(
+                    moto__propietario=request.user.persona_asociada
+                )
+            else:
+                queryset = queryset.none()
+
+        # Estadísticas generales
+        total = queryset.count()
+        pendientes = queryset.filter(estado="pendiente").count()
+        en_proceso = queryset.filter(estado="en_proceso").count()
+        completados = queryset.filter(estado="completado").count()
+        eliminados = queryset.filter(eliminado=True).count()
+
+        # Últimos 30 días
+        ultimos_30_dias = queryset.filter(fecha_registro__gte=hace_30_dias).count()
+        completados_30_dias = queryset.filter(
+            fecha_registro__gte=hace_30_dias, estado="completado"
+        ).count()
+
+        # Última semana
+        ultimos_7_dias = queryset.filter(fecha_registro__gte=hace_7_dias).count()
+        completados_7_dias = queryset.filter(
+            fecha_registro__gte=hace_7_dias, estado="completado"
+        ).count()
+
+        # Ingresos
+        try:
+            ingresos_30_dias = (
+                queryset.filter(
+                    fecha_registro__gte=hace_30_dias, estado="completado"
+                ).aggregate(total=Sum("total"))["total"]
+                or 0
+            )
+        except:
+            ingresos_30_dias = 0
+
+        # Promedio de duración
+        try:
+            avg_duration = (
+                queryset.filter(estado="completado", fecha_completado__isnull=False)
+                .annotate(
+                    duracion=models.F("fecha_completado") - models.F("fecha_ingreso")
+                )
+                .aggregate(avg=Avg("duracion"))["avg"]
+            )
+            avg_duration_days = avg_duration.days if avg_duration else 0
+        except:
+            avg_duration_days = 0
+
+        # Mantenimientos por tipo
+        por_tipo = list(
+            queryset.values("tipo").annotate(count=Count("id")).order_by("-count")[:5]
+        )
+
+        # Mantenimientos por estado
+        por_estado = list(
+            queryset.values("estado").annotate(count=Count("id")).order_by("-count")
+        )
+
+        return Response(
+            {
+                "total": total,
+                "pendientes": pendientes,
+                "en_proceso": en_proceso,
+                "completados": completados,
+                "eliminados": eliminados,
+                "ultimos_30_dias": ultimos_30_dias,
+                "completados_30_dias": completados_30_dias,
+                "ultimos_7_dias": ultimos_7_dias,
+                "completados_7_dias": completados_7_dias,
+                "ingresos_30_dias": float(ingresos_30_dias),
+                "promedio_duracion_dias": avg_duration_days,
+                "por_tipo": por_tipo,
+                "por_estado": por_estado,
+            }
+        )
+
+    @action(detail=False, methods=["delete"])
+    def eliminar_multiples_temporal(self, request):
+        """
+        Elimina múltiples mantenimientos temporalmente (soft delete).
+        DELETE /mantenimientos/eliminar_multiples_temporal/
+        Body: {"ids": [1, 2, 3]}
+        """
+        from django.utils import timezone
+
+        ids = request.data.get("ids", [])
+
+        if not ids:
+            return Response(
+                {"error": "Se requiere una lista de IDs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verificar permisos
+        if not IsAdministrador().has_permission(request, self):
+            return Response(
+                {"error": "No tienes permiso para eliminar mantenimientos"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        mantenimientos = Mantenimiento.objects_all.filter(id__in=ids)
+        count = mantenimientos.count()
+
+        ahora = timezone.now()
+        mantenimientos.update(
+            eliminado=True, fecha_eliminacion=ahora, eliminado_por=request.user
+        )
+
+        return Response(
+            {
+                "message": f"{count} mantenimientos eliminados temporalmente",
+                "eliminados": count,
+            }
+        )
+
+    @action(detail=False, methods=["patch"])
+    def restaurar_multiples(self, request):
+        """
+        Restaura múltiples mantenimientos eliminados.
+        PATCH /mantenimientos/restaurar_multiples/
+        Body: {"ids": [1, 2, 3]}
+        """
+        ids = request.data.get("ids", [])
+
+        if not ids:
+            return Response(
+                {"error": "Se requiere una lista de IDs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verificar permisos
+        if not IsAdministrador().has_permission(request, self):
+            return Response(
+                {"error": "No tienes permiso para restaurar mantenimientos"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        mantenimientos = Mantenimiento.objects_all.filter(id__in=ids, eliminado=True)
+        count = mantenimientos.count()
+
+        mantenimientos.update(
+            eliminado=False, fecha_eliminacion=None, eliminado_por=None
+        )
+
+        return Response(
+            {"message": f"{count} mantenimientos restaurados", "restaurados": count}
+        )
+
 
 class DetalleMantenimientoViewSet(BaseViewSet):
-    """ViewSet optimizado para Detalles de Mantenimiento"""
+    """
+    ViewSet optimizado para Detalles de Mantenimiento.
+
+    Gestiona los servicios realizados en un mantenimiento.
+    """
 
     queryset = DetalleMantenimiento.objects.select_related(
-        "mantenimiento", "servicio"
+        "mantenimiento__moto", "servicio__categoria_servicio"
     ).all()
     serializer_class = DetalleMantenimientoSerializer
     filterset_fields = ["mantenimiento", "servicio"]
@@ -3428,15 +4767,31 @@ class DetalleMantenimientoViewSet(BaseViewSet):
 
         return qs
 
+    def get_permissions(self):
+        if self.action in ["list", "retrieve"]:
+            return [permissions.IsAuthenticated()]
+        elif self.action in ["create"]:
+            return [IsTecnico() | IsEmpleado() | IsAdministrador()]
+        elif self.action in ["destroy"]:
+            return [IsTecnico() | IsAdministrador()]
+        return [IsTecnico() | IsEmpleado() | IsAdministrador()]
+
 
 class RecordatorioMantenimientoViewSet(BaseViewSet):
-    """ViewSet optimizado para Recordatorios de Mantenimiento"""
+    """
+    ViewSet optimizado para Recordatorios de Mantenimiento.
+
+    Endpoints adicionales:
+    - GET /proximos/: Ver recordatorios próximos a vencer
+    - GET /por_km/: Ver recordatorios por kilometraje para una moto
+    - POST /crear_manual/: Crear recordatorio manualmente
+    """
 
     queryset = RecordatorioMantenimiento.objects.select_related(
-        "moto", "categoria_servicio"
+        "moto__propietario", "categoria_servicio", "registrado_por"
     ).all()
     serializer_class = RecordatorioMantenimientoSerializer
-    filterset_fields = ["moto", "categoria_servicio", "enviado"]
+    filterset_fields = ["moto", "categoria_servicio", "enviado", "activo", "tipo"]
     ordering = ["fecha_programada"]
 
     def get_queryset(self):
@@ -3453,24 +4808,166 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
 
         return qs
 
+    def get_permissions(self):
+        if self.action in ["list", "retrieve"]:
+            return [permissions.IsAuthenticated()]
+        elif self.action in ["create", "destroy", "proximos", "por_km"]:
+            return [IsTecnico() | IsEmpleado() | IsAdministrador()]
+        return [IsTecnico() | IsEmpleado() | IsAdministrador()]
+
     @action(detail=False, methods=["get"])
     def proximos(self, request):
-        """Recordatorios próximos"""
-        dias_adelante = int(request.query_params.get("dias", 7))
-        hoy = timezone.now().date()
-        fecha_limite = hoy + timedelta(days=dias_adelante)
+        """
+        Recordatorios próximos a vencer.
 
-        queryset = self.get_queryset().filter(
-            fecha_programada__range=[hoy, fecha_limite], enviado=False
+        Query params:
+        - dias: Días de anticipación (default: 7)
+        - tipo: 'fecha' o 'km'
+        """
+        from core.services import RecordatorioService
+
+        dias = int(request.query_params.get("dias", 7))
+        limite = int(request.query_params.get("limite", 50))
+        tipo = request.query_params.get("tipo")
+
+        # Filtrar por cliente si es un cliente (no administrador)
+        # Obtener los IDs de las motos del cliente
+        from core.models import Moto
+        
+        queryset = self.get_queryset()
+        
+        # Si es cliente, filtrar solo sus recordatorios
+        if IsCliente().has_permission(request, self) and not IsAdministrador().has_permission(request, self):
+            if hasattr(request.user, "persona_asociada") and request.user.persona_asociada:
+                queryset = queryset.filter(moto__propietario=request.user.persona_asociada)
+            else:
+                queryset = queryset.none()
+        
+        # Filtrar por fecha y activo
+        from datetime import timedelta
+        fecha_limite = timezone.now().date() + timedelta(days=dias)
+        
+        queryset = queryset.filter(
+            activo=True,
+            fecha_programada__lte=fecha_limite,
+        )
+        
+        # Si hay tipo, filtrar por tipo
+        if tipo:
+            queryset = queryset.filter(tipo=tipo)
+        
+        # Obtener resultados
+        queryset = queryset.select_related("moto", "categoria_servicio")[:limite]
+        
+        resultados = []
+        for r in queryset:
+            info = r.proximo(dias)
+            resultados.append(
+                {
+                    "id": r.id,
+                    "moto": r.moto.placa,
+                    "moto_id": r.moto.id,
+                    "categoria": r.categoria_servicio.nombre if r.categoria_servicio else None,
+                    "tipo": r.tipo,
+                    "fecha_programada": r.fecha_programada,
+                    "km_proximo": r.km_proximo,
+                    "alerta": info["alerta"],
+                    "mensaje": info["mensaje"],
+                }
+            )
+
+        return Response({"count": len(resultados), "recordatorios": resultados})
+
+    @action(detail=False, methods=["get"])
+    def por_km(self, request):
+        """
+        Recordatorios por kilometraje para una moto específica.
+
+        Query params:
+        - moto_id: ID de la moto (requerido)
+        """
+        from core.services import RecordatorioService
+
+        moto_id = request.query_params.get("moto_id")
+        if not moto_id:
+            return Response(
+                {"error": "El parámetro moto_id es requerido"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            resultados = RecordatorioService.obtener_recordatorios_por_km(
+                moto_id=moto_id
+            )
+            return Response({"count": len(resultados), "recordatorios": resultados})
+        except Moto.DoesNotExist:
+            return Response(
+                {"error": "La moto no existe"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=["post"])
+    def crear_manual(self, request):
+        """
+        Crea un recordatorio manualmente.
+
+        Body:
+        {
+            "moto": id,
+            "categoria_servicio": id,
+            "tipo": "fecha" | "km",
+            "fecha_programada": date (si tipo=fecha),
+            "km_proximo": int (si tipo=km),
+            "notas": string (optional)
+        }
+        """
+        from core.services import RecordatorioService
+
+        try:
+            recordatorio = RecordatorioService.generar_recordatorio_manual(
+                data=request.data, usuario=request.user
+            )
+            return Response(
+                {
+                    "message": "Recordatorio creado correctamente",
+                    "recordatorio": RecordatorioMantenimientoSerializer(
+                        recordatorio
+                    ).data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except ValidationError as e:
+            return Response(
+                {
+                    "error": (
+                        str(e.message_dict) if hasattr(e, "message_dict") else str(e)
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=["post"])
+    def marcar_enviado(self, request, pk=None):
+        """Marca un recordatorio como enviado"""
+        recordatorio = self.get_object()
+        recordatorio.marcar_enviado()
+        return Response(
+            {
+                "message": "Recordatorio marcado como enviado",
+                "recordatorio": RecordatorioMantenimientoSerializer(recordatorio).data,
+            }
         )
 
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+    @action(detail=True, methods=["post"])
+    def desactivar(self, request, pk=None):
+        """Desactiva un recordatorio"""
+        recordatorio = self.get_object()
+        recordatorio.desactivar()
+        return Response(
+            {
+                "message": "Recordatorio desactivado",
+                "recordatorio": RecordatorioMantenimientoSerializer(recordatorio).data,
+            }
+        )
 
 
 class RepuestoMantenimientoViewSet(viewsets.ModelViewSet):
@@ -3485,15 +4982,22 @@ class RepuestoMantenimientoViewSet(viewsets.ModelViewSet):
         repuesto = serializer.save()
         producto = repuesto.producto
 
+        # Usar inventario en lugar de producto.stock_actual
+        try:
+            inventario = producto.inventario
+            stock_disponible = inventario.stock_actual
+        except Inventario.DoesNotExist:
+            stock_disponible = 0
+
         # Verificar stock disponible
-        if producto.stock_actual < repuesto.cantidad:
+        if stock_disponible < repuesto.cantidad:
             raise serializers.ValidationError(
-                f"Stock insuficiente. Disponible: {producto.stock_actual}, Requerido: {repuesto.cantidad}"
+                f"Stock insuficiente. Disponible: {stock_disponible}, Requerido: {repuesto.cantidad}"
             )
 
-        # Descontar stock
-        producto.stock_actual -= repuesto.cantidad
-        producto.save(update_fields=["stock_actual"])
+        # Descontar stock del inventario
+        inventario.stock_actual -= repuesto.cantidad
+        inventario.save(update_fields=["stock_actual"])
 
         # Crear movimiento de inventario
         InventarioMovimiento.objects.create(
@@ -3507,8 +5011,14 @@ class RepuestoMantenimientoViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         """Revertir stock si se elimina el repuesto"""
         producto = instance.producto
-        producto.stock_actual += instance.cantidad
-        producto.save(update_fields=["stock_actual"])
+
+        # Usar inventario en lugar de producto.stock_actual
+        try:
+            inventario = producto.inventario
+            inventario.stock_actual += instance.cantidad
+            inventario.save(update_fields=["stock_actual"])
+        except Inventario.DoesNotExist:
+            pass
 
         # Crear movimiento de inventario para revertir
         InventarioMovimiento.objects.create(
@@ -3528,10 +5038,14 @@ class RepuestoMantenimientoViewSet(viewsets.ModelViewSet):
 class VentaViewSet(BaseViewSet):
     """ViewSet para Ventas"""
 
-    queryset = Venta.objects.select_related("cliente").all()
+    queryset = (
+        Venta.objects.select_related("cliente")
+        .prefetch_related("detalles__producto")
+        .all()
+    )
     serializer_class = VentaSerializer
     search_fields = ["cliente__nombre", "cliente__apellido"]
-    filterset_fields = ["cliente", "estado", "eliminado"]
+    filterset_fields = ["cliente", "estado"]
     ordering = ["-fecha_venta"]
 
     def get_queryset(self):
@@ -3539,7 +5053,11 @@ class VentaViewSet(BaseViewSet):
 
         logger = logging.getLogger(__name__)
 
-        qs = Venta.objects.select_related("cliente").all()
+        qs = (
+            Venta.objects.select_related("cliente")
+            .prefetch_related("detalles__producto")
+            .all()
+        )
         logger.info("🔎 Queryset inicial ventas: %s", qs.count())
 
         # Filtro por eliminado
@@ -3588,13 +5106,20 @@ class VentaViewSet(BaseViewSet):
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
             permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "hard_delete"]:
+        elif self.action in ["destroy"]:
             permission_classes = [IsAdministrador]
         elif self.action in ["soft_delete", "restore"]:
             permission_classes = [IsEmpleado | IsAdministrador]
         else:
             permission_classes = [IsEmpleado | IsAdministrador]
         return [permission() for permission in permission_classes]
+
+    def perform_update(self, serializer):
+        """Set actualizado_por al actualizar"""
+        if serializer.instance and serializer.instance.actualizado_por is None:
+            serializer.save(actualizado_por=self.request.user)
+        else:
+            serializer.save()
 
     def update(self, request, *args, **kwargs):
         """Validación especial para empleados"""
@@ -3612,37 +5137,84 @@ class VentaViewSet(BaseViewSet):
 
         return super().update(request, *args, **kwargs)
 
+    @action(detail=True, methods=["patch"], url_path="restore")
+    def restore(self, request, pk=None):
+        """Restaurar venta eliminada"""
+        try:
+            # Venta no hereda de SoftDeleteModel, usamos.objects regular
+            instance = Venta.objects.get(pk=pk)
+        except Venta.DoesNotExist:
+            return Response(
+                {"detail": "Venta no encontrada"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not hasattr(instance, "eliminado"):
+            return Response(
+                {"error": "Esta venta no soporta restauración"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Restaurar la venta
+        instance.eliminado = False
+
+        # Limpiar campos de eliminación
+        update_fields = ["eliminado"]
+        if hasattr(instance, "fecha_eliminacion"):
+            instance.fecha_eliminacion = None
+            update_fields.append("fecha_eliminacion")
+        if hasattr(instance, "eliminado_por"):
+            instance.eliminado_por = None
+            update_fields.append("eliminado_por")
+
+        instance.save(update_fields=update_fields)
+        serializer = self.get_serializer(instance)
+        logger.info(f"✅ Venta {pk} restaurada por {request.user.username}")
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     @api_view(["POST"])
     @permission_classes([IsAuthenticated])
     def procesar_venta_pos(request):
         """
         Endpoint específico para procesar ventas desde el POS
         Maneja la creación de venta con detalles y actualización de stock automática
+        - Acepta 'items' o 'productos' del frontend
+        - Reduce stock automáticamente
+        - Guarda trazabilidad (creado_por)
+        - Soporta descuentos y notas
         """
         try:
             data = request.data
 
-            # Validaciones básicas
-            if not data.get("items") or len(data["items"]) == 0:
+            # Aceptar ambos nombres: 'items' o 'productos'
+            items = data.get("items") or data.get("productos")
+
+            if not items or len(items) == 0:
                 return Response(
                     {"error": "La venta debe tener al menos un producto"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             with transaction.atomic():
-                # Crear la venta principal
+                # Obtener usuario actual para trazabilidad
+                usuario_actual = request.user
+
+                # Preparar datos de la venta con descuento y notas
                 venta_data = {
                     "cliente": data.get("cliente_id"),
                     "fecha_venta": timezone.now(),
                     "subtotal": float(data.get("subtotal", 0)),
                     "impuesto": float(data.get("impuesto", 0)),
+                    "descuento": float(data.get("descuento", 0)),
                     "total": float(data.get("total", 0)),
                     "estado": "completada",
+                    "notas": data.get("notas", ""),
                 }
 
                 venta_serializer = VentaSerializer(data=venta_data)
                 if venta_serializer.is_valid():
-                    venta = venta_serializer.save()
+                    # Guardar con el usuario actual
+                    venta = venta_serializer.save(creado_por=usuario_actual)
                 else:
                     return Response(
                         venta_serializer.errors, status=status.HTTP_400_BAD_REQUEST
@@ -3650,14 +5222,26 @@ class VentaViewSet(BaseViewSet):
 
                 # Procesar cada item de la venta
                 detalles_creados = []
-                for item in data["items"]:
+                for item in items:
                     try:
-                        producto = Producto.objects.get(id=item["producto_id"])
+                        # Aceptar tanto "producto_id" como "id" del frontend
+                        producto_id = item.get("producto_id") or item.get("id")
+                        if not producto_id:
+                            raise Exception("ID de producto no proporcionado")
+
+                        producto = Producto.objects.get(id=producto_id)
+
+                        # Usar el stock del inventario como fuente principal
+                        try:
+                            inventario = Inventario.objects.get(producto=producto)
+                            stock_disponible = inventario.stock_actual
+                        except Inventario.DoesNotExist:
+                            stock_disponible = 0
 
                         # Validar stock disponible
-                        if producto.stock_actual < item["cantidad"]:
+                        if stock_disponible < item["cantidad"]:
                             raise Exception(
-                                f"Stock insuficiente para {producto.nombre}. Disponible: {producto.stock_actual}"
+                                f"Stock insuficiente para {producto.nombre}. Disponible: {stock_disponible}"
                             )
 
                         # Crear detalle de venta
@@ -3666,7 +5250,12 @@ class VentaViewSet(BaseViewSet):
                             "producto": producto.id,
                             "cantidad": item["cantidad"],
                             "precio_unitario": float(item["precio_unitario"]),
-                            "subtotal": float(item["subtotal"]),
+                            "subtotal": float(
+                                item.get(
+                                    "subtotal",
+                                    item["cantidad"] * float(item["precio_unitario"]),
+                                )
+                            ),
                         }
 
                         detalle_serializer = DetalleVentaSerializer(data=detalle_data)
@@ -3678,25 +5267,32 @@ class VentaViewSet(BaseViewSet):
                                 f"Error en detalle de venta: {detalle_serializer.errors}"
                             )
 
-                        # Obtener o crear inventario para el producto
-                        inventario, created = Inventario.objects.get_or_create(
-                            producto=producto,
-                            defaults={
-                                "stock_actual": 0,
-                                "stock_minimo": producto.stock_minimo,
-                            },
-                        )
+                        # =====================
+                        # REDUCIR STOCK
+                        # =====================
+                        cantidad_vendida = item["cantidad"]
 
-                        # Validar stock disponible en inventario
-                        if inventario.stock_actual < item["cantidad"]:
-                            raise Exception(
-                                f"Stock insuficiente para {producto.nombre}. Disponible: {inventario.stock_actual}"
+                        # Reducir en Inventario si existe
+                        if inventario:
+                            inventario.stock_actual = max(
+                                0, inventario.stock_actual - cantidad_vendida
+                            )
+                            inventario.save(update_fields=["stock_actual"])
+
+                            # Registrar movimiento de inventario
+                            from core.models import MovimientoInventario
+
+                            MovimientoInventario.objects.create(
+                                producto=producto,
+                                inventario=inventario,
+                                tipo="salida",
+                                cantidad=cantidad_vendida,
+                                motivo=f"Venta POS #{venta.id}",
+                                registrado_por=usuario_actual,
                             )
 
                     except Producto.DoesNotExist:
-                        raise Exception(
-                            f'Producto con ID {item["producto_id"]} no encontrado'
-                        )
+                        raise Exception(f"Producto con ID {producto_id} no encontrado")
                     except Exception as e:
                         raise Exception(str(e))
 
@@ -3706,15 +5302,19 @@ class VentaViewSet(BaseViewSet):
                 ).get(id=venta.id)
                 response_data = {
                     "id": venta.id,
+                    "numero_venta": f"Venta-{venta.id:06d}",
                     "fecha": venta.fecha_venta.isoformat(),
                     "cliente": (
                         PersonaSerializer(venta.cliente).data if venta.cliente else None
                     ),
                     "subtotal": str(venta.subtotal),
+                    "descuento": str(venta.descuento),
                     "impuesto": str(venta.impuesto),
                     "total": str(venta.total),
                     "estado": venta.estado,
+                    "notas": venta.notas or "",
                     "metodo_pago": data.get("metodo_pago", "efectivo"),
+                    "vendido_por": usuario_actual.username,
                     "items": [
                         {
                             "id": detalle.id,
@@ -3729,12 +5329,12 @@ class VentaViewSet(BaseViewSet):
                 }
 
                 logger.info(
-                    f"Venta POS procesada exitosamente: #{venta.id} por usuario {request.user.username}"
+                    f"✅ Venta POS procesada exitosamente: #{venta.id} por usuario {usuario_actual.username} - Total: {venta.total}"
                 )
                 return Response(response_data, status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            logger.error(f"Error procesando venta POS: {str(e)}")
+            logger.error(f"❌ Error procesando venta POS: {str(e)}")
             return Response(
                 {"error": f"Error al procesar venta: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3825,15 +5425,24 @@ class VentaViewSet(BaseViewSet):
                 productos = productos.filter(categoria_id=categoria_id)
 
             # Limitar resultados
-            productos = productos[:20]
+            productos = productos.select_related("inventario")[:20]
 
             results = []
             for producto in productos:
+                # Usar inventario en lugar de producto.stock_actual
+                try:
+                    inventario = producto.inventario
+                    stock_actual = inventario.stock_actual
+                    stock_minimo = inventario.stock_minimo
+                except Inventario.DoesNotExist:
+                    stock_actual = 0
+                    stock_minimo = 0
+
                 # Determinar estado del stock
-                if producto.stock_actual <= 0:
+                if stock_actual <= 0:
                     stock_status = "sin_stock"
                     stock_color = "red"
-                elif producto.stock_actual <= producto.stock_minimo:
+                elif stock_actual <= stock_minimo:
                     stock_status = "stock_bajo"
                     stock_color = "yellow"
                 else:
@@ -3847,8 +5456,8 @@ class VentaViewSet(BaseViewSet):
                         "nombre": producto.nombre,
                         "descripcion": producto.descripcion,
                         "precio_venta": str(producto.precio_venta),
-                        "stock_actual": producto.stock_actual,
-                        "stock_minimo": producto.stock_minimo,
+                        "stock_actual": stock_actual,
+                        "stock_minimo": stock_minimo,
                         "stock_status": stock_status,
                         "stock_color": stock_color,
                         "categoria": {
@@ -3872,8 +5481,8 @@ class VentaViewSet(BaseViewSet):
                             else None
                         ),
                         "imagen_url": producto.imagen.url if producto.imagen else None,
-                        "disponible": producto.stock_actual > 0,
-                        "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {producto.stock_actual})",
+                        "disponible": stock_actual > 0,
+                        "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {stock_actual})",
                     }
                 )
 
@@ -3955,14 +5564,23 @@ class VentaViewSet(BaseViewSet):
                 id=producto_id, activo=True, eliminado=False
             )
 
+            # Usar inventario en lugar de producto.stock_actual
+            try:
+                inventario = producto.inventario
+                stock_actual = inventario.stock_actual
+                stock_minimo = inventario.stock_minimo
+            except Inventario.DoesNotExist:
+                stock_actual = 0
+                stock_minimo = 0
+
             stock_info = {
                 "id": producto.id,
                 "nombre": producto.nombre,
                 "codigo": producto.codigo,
-                "stock_actual": producto.stock_actual,
-                "stock_minimo": producto.stock_minimo,
-                "disponible": producto.stock_actual > 0,
-                "stock_bajo": producto.stock_actual <= producto.stock_minimo,
+                "stock_actual": stock_actual,
+                "stock_minimo": stock_minimo,
+                "disponible": stock_actual > 0,
+                "stock_bajo": stock_actual <= stock_minimo,
                 "precio_venta": str(producto.precio_venta),
             }
 
@@ -3986,7 +5604,7 @@ class PagoViewSet(viewsets.ModelViewSet):
     queryset = Pago.objects.select_related("venta__cliente", "registrado_por").all()
     serializer_class = PagoSerializer
     search_fields = ["venta__id", "venta__cliente__nombre", "venta__cliente__apellido"]
-    filterset_fields = ["cliente", "estado", "eliminado", "registrado_por"]
+    filterset_fields = ["cliente", "estado", "registrado_por"]
     ordering = ["-fecha_pago"]
     filter_backends = [
         DjangoFilterBackend,
@@ -4132,7 +5750,7 @@ class DetalleVentaViewSet(BaseViewSet):
         # Obtener o crear inventario para el producto
         inventario, created = Inventario.objects.get_or_create(
             producto=detalle.producto,
-            defaults={"stock_actual": 0, "stock_minimo": detalle.producto.stock_minimo},
+            defaults={"stock_actual": 0, "stock_minimo": 0},
         )
 
         # Validar stock disponible
@@ -4191,10 +5809,15 @@ class DetalleVentaViewSet(BaseViewSet):
 class InventarioViewSet(BaseViewSet):
     """ViewSet optimizado para Inventario"""
 
-    queryset = Inventario.objects.select_related("producto").all()
+    queryset = Inventario.objects.select_related(
+        "producto",
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+        "eliminado_por__persona_asociada",
+    ).all()
     serializer_class = InventarioSerializer
     search_fields = ["producto__nombre"]
-    filterset_fields = ["producto", "stock_actual", "stock_minimo", "eliminado"]
+    filterset_fields = ["producto", "stock_actual", "stock_minimo"]
     ordering = ["-fecha_registro"]
 
     def get_permissions(self):
@@ -4349,11 +5972,15 @@ class InventarioMovimientoViewSet(BaseViewSet):
     """ViewSet optimizado para Movimientos de Inventario"""
 
     queryset = InventarioMovimiento.objects.select_related(
-        "inventario", "usuario"
+        "inventario",
+        "usuario",
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+        "eliminado_por__persona_asociada",
     ).all()
     serializer_class = InventarioMovimientoSerializer
     search_fields = ["inventario__producto__nombre", "motivo"]
-    filterset_fields = ["inventario", "tipo", "usuario", "eliminado"]
+    filterset_fields = ["inventario", "tipo", "usuario"]
     ordering = ["-fecha_registro"]
 
     def get_permissions(self):
@@ -4366,7 +5993,10 @@ class InventarioMovimientoViewSet(BaseViewSet):
         return [CustomPermission()]
 
     def perform_create(self, serializer):
-        serializer.save(usuario=self.request.user)
+        usuario_actual = (
+            self.request.user if self.request.user.is_authenticated else None
+        )
+        serializer.save(usuario=usuario_actual, creado_por=usuario_actual)
 
 
 # =======================================
@@ -4563,7 +6193,25 @@ def reporte_inventario(request):
         )
 
         # Return data in the format expected by the frontend
-        return Response(list(stock_bajo))
+        reporte = {
+            "stock_bajo": list(stock_bajo),
+            "movimientos_recientes": [
+                {
+                    "id": m["id"],
+                    "tipo": m["tipo"],
+                    "cantidad": m["cantidad"],
+                    "motivo": m["motivo"],
+                    "fecha_registro": (
+                        m["fecha_registro"].strftime("%Y-%m-%d %H:%M:%S")
+                        if m["fecha_registro"]
+                        else None
+                    ),
+                    "producto": m["producto"],
+                }
+                for m in movimientos_recientes
+            ],
+        }
+        return Response(reporte)
     except Exception:
         return Response(
             {"error": "Error al generar reporte"},
@@ -4860,7 +6508,9 @@ def buscar_productos(request):
             return Response({"results": []})
 
         # Buscar por múltiples campos
-        productos = Producto.objects.select_related("categoria", "proveedor").filter(
+        productos = Producto.objects.select_related(
+            "categoria", "proveedor", "inventario"
+        ).filter(
             Q(id__icontains=query)
             | Q(codigo__icontains=query)
             | Q(nombre__icontains=query)
@@ -4873,6 +6523,15 @@ def buscar_productos(request):
 
         results = []
         for producto in productos:
+            # Usar inventario en lugar de producto.stock_actual
+            try:
+                inventario = producto.inventario
+                stock_actual = inventario.stock_actual
+                stock_minimo = inventario.stock_minimo
+            except Inventario.DoesNotExist:
+                stock_actual = 0
+                stock_minimo = 0
+
             results.append(
                 {
                     "id": producto.id,
@@ -4880,8 +6539,8 @@ def buscar_productos(request):
                     "nombre": producto.nombre,
                     "descripcion": producto.descripcion,
                     "precio_venta": str(producto.precio_venta),
-                    "stock_actual": producto.stock_actual,
-                    "stock_minimo": producto.stock_minimo,
+                    "stock_actual": stock_actual,
+                    "stock_minimo": stock_minimo,
                     "categoria": {
                         "id": producto.categoria.id,
                         "nombre": producto.categoria.nombre,
@@ -4898,9 +6557,9 @@ def buscar_productos(request):
                         if producto.proveedor
                         else None
                     ),
-                    "stock_disponible": producto.stock_actual > 0,
-                    "stock_bajo": producto.stock_actual <= producto.stock_minimo,
-                    "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {producto.stock_actual})",
+                    "stock_disponible": stock_actual > 0,
+                    "stock_bajo": stock_actual <= stock_minimo,
+                    "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {stock_actual})",
                 }
             )
 
@@ -5102,14 +6761,92 @@ def test_maintenance_notifications(request):
         )
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, IsCliente])
+def cliente_moto_detalle(request, moto_id):
+    """
+    Endpoint para obtener los detalles de una moto específica del cliente,
+    incluyendo información de ventas asociadas.
+    """
+    try:
+        # Verificar persona_asociada
+        if (
+            not hasattr(request.user, "persona_asociada")
+            or not request.user.persona_asociada
+        ):
+            return Response(
+                {"error": "Usuario no tiene persona asociada"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cliente = request.user.persona_asociada
+
+        # Obtener la moto del cliente
+        try:
+            from core.models import Moto as MotoModel
+
+            moto = MotoModel.objects.get(
+                id=moto_id, propietario=cliente, eliminado=False
+            )
+        except MotoModel.DoesNotExist:
+            return Response(
+                {"error": "Moto no encontrada"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Serializar la moto
+        from .serializers import MotoSerializer
+
+        moto_serializer = MotoSerializer(moto)
+        moto_data = moto_serializer.data
+
+        # Buscar ventas asociadas al cliente que puedan estar relacionadas con esta moto
+        # (Las ventas se asocian al cliente, no directamente a la moto)
+        from ..models import Venta
+
+        ventas = (
+            Venta.objects.filter(cliente=cliente, eliminado=False)
+            .select_related("registrado_por", "creado_por")
+            .order_by("-fecha_venta")[:5]
+        )
+
+        from .serializers import VentaSerializer
+
+        ventas_serializer = VentaSerializer(ventas, many=True)
+
+        return Response(
+            {
+                "success": True,
+                "moto": moto_data,
+                "ventas_recientes": ventas_serializer.data,
+                "ventas_count": len(ventas_serializer.data),
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error obteniendo detalle de moto: {str(e)}")
+        import traceback
+
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return Response(
+            {"error": f"Error interno del servidor: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 # =======================================
 # RECORDATORIO VIEWSETS
+# =======================================
+# PRECIOS ESPECIALES POR CLIENTE
+# =======================================
+
+
 # =======================================
 class RecordatorioMantenimientoViewSet(BaseViewSet):
     """
     ViewSet para RecordatorioMantenimiento
     Hereda de BaseViewSet para:
-    - Soft delete / restore / hard delete
+    - Soft delete / restore
     - Filtros por activo/eliminado
     - Logging estandarizado
     """
@@ -5258,5 +6995,118 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
             return Response(serializer.data, status=status.HTTP_200_OK)
         else:
             return Response(
-                {"detail": "El registro no está eliminado"}, status=status.HTTP_400_BAD_REQUEST
+                {"detail": "El registro no está eliminado"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    # ===========================
+    # Enviar notificación push
+    # ===========================
+    @action(detail=True, methods=["post"], url_path="enviar_notificacion")
+    def enviar_notificacion(self, request, pk=None):
+        """
+        Enviar notificación push para un recordatorio de mantenimiento
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            from core.services.notification_service import send_maintenance_notification
+
+            # Obtener el recordatorio con las relaciones
+            try:
+                recordatorio = RecordatorioMantenimiento.objects.select_related(
+                    "moto", "moto__propietario"
+                ).get(pk=pk)
+            except RecordatorioMantenimiento.DoesNotExist:
+                logger.error(f"Recordatorio no encontrado ID: {pk}")
+                return Response(
+                    {"detail": "Recordatorio no encontrado"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # Obtener la moto y el usuario
+            moto = recordatorio.moto
+            if not moto:
+                logger.error("El recordatorio no tiene una moto asociada")
+                return Response(
+                    {"error": "El recordatorio no tiene una moto asociada"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Obtener el usuario a través del propietario (Persona)
+            propietario = moto.propietario
+            if not propietario:
+                logger.error(f"La moto (ID: {moto.id}) no tiene propietario asignado")
+                return Response(
+                    {"error": f"La moto (ID: {moto.id}) no tiene propietario asignado"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # La relación es: Persona -> usuario (ForeignKey a Usuario)
+            usuario = propietario.usuario
+            if not usuario:
+                logger.error(
+                    f"El propietario (ID: {propietario.id}) no tiene usuario de app asociado"
+                )
+                return Response(
+                    {
+                        "error": f"El propietario (ID: {propietario.id}) no tiene un usuario de app asociado"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not usuario.fcm_token:
+                logger.error("El usuario no tiene token FCM registrado")
+                return Response(
+                    {
+                        "error": "El usuario no tiene token FCM registrado. Debe iniciar sesión en la app móvil primero."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Preparar datos de la notificación
+            moto_info = f"{moto.marca} {moto.modelo} - {moto.placa}"
+            fecha = (
+                recordatorio.fecha_programada.strftime("%d/%m/%Y")
+                if recordatorio.fecha_programada
+                else ""
+            )
+
+            # Enviar notificación
+            success = send_maintenance_notification(
+                user_token=usuario.fcm_token, moto_info=moto_info, fecha=fecha
+            )
+
+            if success:
+                # Marcar como enviado
+                recordatorio.enviado = True
+                recordatorio.save(update_fields=["enviado"])
+
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Notificación enviada exitosamente",
+                        "usuario": usuario.correo_electronico,
+                        "moto": moto_info,
+                    }
+                )
+            else:
+                logger.error(
+                    "[DEBUG] Error al enviar la notificación push - El servicio devolvió False"
+                )
+                return Response(
+                    {"error": "Error al enviar la notificación push"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        except Exception as e:
+            import traceback
+
+            logger.error(f"[DEBUG] Error enviando notificación: {str(e)}")
+            logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            return Response(
+                {"error": f"Error interno del servidor: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

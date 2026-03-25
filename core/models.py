@@ -20,17 +20,45 @@ class SoftDeleteManager(models.Manager):
 
 class SoftDeleteModel(models.Model):
     eliminado = models.BooleanField(default=False)
+    eliminado_por = models.ForeignKey(
+        "Usuario",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="%(class)s_eliminados",
+        editable=False,
+        help_text="Usuario que eliminó este registro",
+    )
+    fecha_eliminacion = models.DateTimeField(null=True, blank=True, editable=False)
     objects = SoftDeleteManager()
     objects_all = models.Manager()  # acceso a todos (incluyendo eliminados)
 
     def delete(self, *args, **kwargs):
         """Soft delete por defecto"""
-        self.eliminado = True
-        self.save(update_fields=["eliminado"])
+        # Obtener el usuario que está realizando la eliminación
+        from django.db import connection
 
-    def delete_real(self, *args, **kwargs):
-        """Eliminar físicamente, saltando soft delete"""
-        super().delete(*args, **kwargs)
+        user_id = None
+        try:
+            # Intentar obtener el usuario del request actual
+            from django.utils import timezone
+            from django.contrib.auth import get_user_model
+
+            User = get_user_model()
+            # Buscar en el connection.queries el usuario o en el stack
+            if hasattr(self, "_current_user") and self._current_user:
+                user_id = self._current_user.id
+        except Exception:
+            pass
+
+        self.eliminado = True
+        self.fecha_eliminacion = timezone.now()
+        if user_id:
+            try:
+                self.eliminado_por_id = user_id
+            except Exception:
+                pass
+        self.save(update_fields=["eliminado", "eliminado_por", "fecha_eliminacion"])
 
     class Meta:
         abstract = True
@@ -39,6 +67,24 @@ class SoftDeleteModel(models.Model):
 class TimestampedModel(SoftDeleteModel):
     fecha_registro = models.DateTimeField(auto_now_add=True)
     fecha_actualizacion = models.DateTimeField(auto_now=True)
+    creado_por = models.ForeignKey(
+        "Usuario",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="%(class)s_creados",
+        editable=False,
+        help_text="Usuario que creó este registro",
+    )
+    actualizado_por = models.ForeignKey(
+        "Usuario",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="%(class)s_actualizados",
+        editable=False,
+        help_text="Usuario que realizó la última actualización",
+    )
 
     class Meta:
         abstract = True
@@ -129,6 +175,13 @@ class Usuario(AbstractUser, TimestampedModel):
     is_active = models.BooleanField(default=True)
     fcm_token = models.TextField(
         blank=True, null=True, help_text="Token FCM para notificaciones push"
+    )
+    # Campos para protección de login
+    failed_login_attempts = models.PositiveIntegerField(
+        default=0, help_text="Número de intentos de login fallidos"
+    )
+    last_failed_login = models.DateTimeField(
+        blank=True, null=True, help_text="Último intento de login fallido"
     )
 
     groups = models.ManyToManyField(Group, related_name="usuario_set", blank=True)
@@ -349,6 +402,7 @@ class Moto(TimestampedModel):
 # MANTENIMIENTO
 # =======================================
 class Mantenimiento(TimestampedModel):
+    # Estados del mantenimiento (flujo obligatorio: pendiente -> en_proceso -> completado)
     ESTADO_CHOICES = [
         ("pendiente", "Pendiente"),
         ("en_proceso", "En Proceso"),
@@ -356,6 +410,20 @@ class Mantenimiento(TimestampedModel):
         ("cancelado", "Cancelado"),
     ]
 
+    # Tipo de mantenimiento
+    TIPO_CHOICES = [
+        ("preventivo", "Preventivo"),
+        ("correctivo", "Correctivo"),
+    ]
+
+    # Prioridad del mantenimiento
+    PRIORIDAD_CHOICES = [
+        ("baja", "Baja"),
+        ("media", "Media"),
+        ("alta", "Alta"),
+    ]
+
+    # Campos principales
     moto = models.ForeignKey(Moto, on_delete=models.CASCADE)
     tecnico_asignado = models.ForeignKey(
         Usuario,
@@ -373,20 +441,228 @@ class Mantenimiento(TimestampedModel):
         max_length=20, choices=ESTADO_CHOICES, default="pendiente"
     )
     kilometraje_ingreso = models.PositiveIntegerField()
+
+    # Campos nuevos: tipo y prioridad
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default="correctivo")
+    prioridad = models.CharField(
+        max_length=10, choices=PRIORIDAD_CHOICES, default="media"
+    )
+
+    # Total calculado automáticamente
     total = models.DecimalField(
         max_digits=10, decimal_places=2, default=Decimal("0.00")
     )
+
+    # Costo adicional (para gastos extras como mano de obra adicional, materiales, etc.)
+    costo_adicional = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Costo adicional por servicios extras o materiales no incluidos en repuestos",
+    )
+
+    # Auditoría adicional: usuario que completó el mantenimiento
+    completado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mantenimientos_completados",
+        help_text="Usuario que completó el mantenimiento",
+    )
+    fecha_completado = models.DateTimeField(null=True, blank=True)
+
+    # Campos para eliminación lógica (soft delete)
+    eliminado = models.BooleanField(default=False)
+    eliminado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mantenimientos_eliminados",
+    )
+    fecha_eliminacion = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "mantenimiento"
         verbose_name = "Mantenimiento"
         verbose_name_plural = "Mantenimientos"
+        ordering = ["-fecha_ingreso"]
 
     def __str__(self):
         return f"Mantenimiento {self.id} - {self.moto.placa}"
 
+    def clean(self):
+        """Validaciones personalizadas del modelo"""
+        super().clean()
+
+        # Validar que no haya mantenimiento sin moto
+        # Usar moto_id para evitar RelatedObjectDoesNotExist
+        if not self.moto_id:
+            raise ValidationError("El mantenimiento debe estar asociado a una moto")
+
+        # Validar que el kilometraje no sea menor al anterior
+        # Usar moto_id para evitar RelatedObjectDoesNotExist
+        if self.kilometraje_ingreso and self.moto_id:
+            km_actual_moto = self.moto.kilometraje or 0
+            # Si es un mantenimiento nuevo o el km cambió
+            if not self.pk or self.kilometraje_ingreso < km_actual_moto:
+                # Permitir si es el primer mantenimiento o si es un mantenimiento mayor
+                # Pero dar advertencia
+                pass  # La validación principal se hace en el save o a nivel de form
+
+    def save(self, *args, **kwargs):
+        """Guardar con validaciones"""
+        # Validar kilometraje al crear
+        # Usar moto_id para evitar RelatedObjectDoesNotExist
+        if not self.pk and self.moto_id:
+            # Obtener kilometraje directamente de la moto usando el ID
+            try:
+                from core.models import Moto
+
+                moto = Moto.objects.get(id=self.moto_id)
+                km_actual = moto.kilometraje or 0
+                if self.kilometraje_ingreso < km_actual:
+                    raise ValidationError(
+                        f"El kilometraje de ingreso ({self.kilometraje_ingreso}) "
+                        f"no puede ser menor al kilometraje actual de la moto ({km_actual})"
+                    )
+            except Moto.DoesNotExist:
+                pass  # Si la moto no existe, el validador del serializer manejará el error
+
+        super().save(*args, **kwargs)
+
+    # =======================================
+    # MÉTODOS DE LÓGICA DE NEGOCIO
+    # =======================================
+
+    def calcular_total(self):
+        """
+        Calcula automáticamente el total del mantenimiento sumando:
+        - Precios de todos los servicios (DetalleMantenimiento)
+        - Subtotales de todos los repuestos (RepuestoMantenimiento)
+        - Costo adicional
+        """
+        from decimal import Decimal
+
+        # Sumar precios de servicios
+        total_servicios = sum(Decimal(str(d.precio)) for d in self.detalles.all())
+
+        # Sumar subtotales de repuestos
+        total_repuestos = sum(Decimal(str(r.subtotal)) for r in self.repuestos.all())
+
+        # Agregar costo adicional
+        costo_adicional = (
+            Decimal(str(self.costo_adicional))
+            if self.costo_adicional
+            else Decimal("0.00")
+        )
+
+        self.total = total_servicios + total_repuestos + costo_adicional
+        self.save(update_fields=["total"])
+        return self.total
+
+    def tiene_items(self):
+        """
+        Verifica si el mantenimiento tiene servicios o repuestos.
+        Retorna True si tiene al menos uno.
+        """
+        return self.detalles.exists() or self.repuestos.exists()
+
+    def puede_cambiar_a(self, nuevo_estado):
+        """
+        Valida si la transición de estado es válida.
+
+        Flujo obligatorio:
+        pendiente -> en_proceso -> completado
+
+        Cualquier estado puede pasar a cancelado.
+        """
+        transiciones_validas = {
+            "pendiente": ["en_proceso", "cancelado"],
+            "en_proceso": ["completado", "cancelado"],
+            "completado": [],  # No se puede cambiar desde completado
+            "cancelado": [],  # No se puede cambiar desde cancelado
+        }
+
+        return nuevo_estado in transiciones_validas.get(self.estado, [])
+
+    def cambiar_estado(self, nuevo_estado, usuario=None):
+        """
+        Cambia el estado del mantenimiento con validaciones.
+
+        Args:
+            nuevo_estado: El nuevo estado a establecer
+            usuario: El usuario que realiza el cambio
+
+        Returns:
+            dict: {success: bool, message: str, mantenimiento: Mantenimiento}
+        """
+        from django.utils import timezone
+
+        # Validar transición
+        if not self.puede_cambiar_a(nuevo_estado):
+            return {
+                "success": False,
+                "message": f"No se puede cambiar de '{self.estado}' a '{nuevo_estado}'. "
+                f"Flujo válido: pendiente → en_proceso → completado",
+                "mantenimiento": self,
+            }
+
+        # Validar que tenga servicios o repuestos al completar
+        if nuevo_estado == "completado" and not self.tiene_items():
+            return {
+                "success": False,
+                "message": "No se puede completar un mantenimiento sin servicios ni repuestos",
+                "mantenimiento": self,
+            }
+
+        # Guardar estado anterior
+        estado_anterior = self.estado
+
+        # Realizar el cambio
+        self.estado = nuevo_estado
+
+        # Si se completa, registrar fecha y usuario
+        if nuevo_estado == "completado":
+            self.fecha_completado = timezone.now()
+            if usuario:
+                self.completado_por = usuario
+            # Actualizar kilometraje de la moto si hay uno de salida
+            if hasattr(self, "kilometraje_salida") and self.kilometraje_salida:
+                self.moto.kilometraje = self.kilometraje_salida
+                self.moto.save(update_fields=["kilometraje"])
+
+        self.save(update_fields=["estado", "fecha_completado", "completado_por"])
+
+        return {
+            "success": True,
+            "message": f"Estado cambiado de '{estado_anterior}' a '{nuevo_estado}'",
+            "mantenimiento": self,
+        }
+
+    def puede_completarse(self):
+        """
+        Verifica si el mantenimiento puede ser completado.
+        """
+        return self.tiene_items() and self.estado == "en_proceso"
+
 
 class DetalleMantenimiento(TimestampedModel):
+    """
+    Detalle de un mantenimiento que registra los servicios realizados.
+
+    Utilizado para:
+    - Registrar servicios (cambio de aceite, revisión, etc.)
+    - Generar recordatorios automáticos basados en el servicio
+    """
+
+    TIPO_ACEITE_CHOICES = [
+        ("mineral", "Mineral"),
+        ("semisintetico", "Semisintético"),
+        ("sintetico", "Sintético"),
+    ]
+
     mantenimiento = models.ForeignKey(
         Mantenimiento, on_delete=models.CASCADE, related_name="detalles"
     )
@@ -394,18 +670,175 @@ class DetalleMantenimiento(TimestampedModel):
     precio = models.DecimalField(max_digits=10, decimal_places=2)
     observaciones = models.TextField(blank=True)
 
+    # Campos para cambios de aceite y generación de recordatorios
+    tipo_aceite = models.CharField(
+        max_length=20, choices=TIPO_ACEITE_CHOICES, null=True, blank=True
+    )
+    km_proximo_cambio = models.PositiveIntegerField(null=True, blank=True)
+
     class Meta:
         db_table = "detalle_mantenimiento"
         verbose_name = "Detalle de Mantenimiento"
         verbose_name_plural = "Detalles de Mantenimiento"
 
+    def __str__(self):
+        return f"{self.servicio.nombre} - Mantenimiento {self.mantenimiento_id}"
+
+    def es_cambio_aceite(self):
+        """Verifica si este detalle es un cambio de aceite"""
+        nombre_servicio = self.servicio.nombre.lower()
+        return "aceite" in nombre_servicio or "oil" in nombre_servicio
+
+    def generar_recordatorios(self):
+        """
+        Genera recordatorios automáticos SOLO para servicios específicos:
+        - Cambio de aceite y filtros: por KM (usa km_proximo_cambio del usuario) y por fecha (desde fecha_entrega)
+        - Mantenimiento general: por fecha (60 días / 2 meses desde fecha_entrega)
+
+        Otros servicios NO generan recordatorios automáticos.
+        """
+        from django.utils import timezone
+        from datetime import timedelta
+
+        moto = self.mantenimiento.moto
+        km_actual = self.mantenimiento.kilometraje_ingreso or 0
+        categoria = self.servicio.categoria_servicio
+        nombre_categoria = categoria.nombre.lower()
+
+        # Categorías válidas para recordatorios automáticos
+        CATEGORIAS_VALIDAS = ["cambio de aceite y filtros", "mantenimiento general"]
+
+        # Solo crear recordatorios para las categorías específicas
+        if nombre_categoria not in CATEGORIAS_VALIDAS:
+            return
+
+        # Usar fecha de entrega si existe, si no usar fecha de ingreso
+        if self.mantenimiento.fecha_entrega:
+            fecha_base = self.mantenimiento.fecha_entrega.date()
+        else:
+            fecha_base = self.mantenimiento.fecha_ingreso.date()
+
+        if nombre_categoria == "cambio de aceite y filtros":
+            # Para cambio de aceite: crear recordatorio por KM y por FECHA
+            # Intervalos según tipo de aceite
+            KM_INTERVALS = {
+                "sintetico": 6000,
+                "semisintetico": 4000,
+                "mineral": 2000,
+            }
+            DIAS_INTERVALS = {
+                "sintetico": 180,
+                "semisintetico": 90,
+                "mineral": 30,
+            }
+
+            # Usar km_proximo_cambio del usuario si existe, si no calcular automáticamente
+            if self.km_proximo_cambio:
+                km_proximo = self.km_proximo_cambio
+            else:
+                km_interval = KM_INTERVALS.get(self.tipo_aceite, 4000)
+                km_proximo = km_actual + km_interval
+
+            # Fecha basada en tipo de aceite desde fecha de entrega
+            dias_interval = DIAS_INTERVALS.get(self.tipo_aceite, 90)
+            fecha_proxima = fecha_base + timedelta(days=dias_interval)
+
+            # Crear/actualizar recordatorio por KM
+            self._crear_o_actualizar_recordatorio(
+                moto=moto, categoria=categoria, tipo="km", km_proximo=km_proximo
+            )
+
+            # Crear/actualizar recordatorio por FECHA
+            self._crear_o_actualizar_recordatorio(
+                moto=moto,
+                categoria=categoria,
+                tipo="fecha",
+                fecha_programada=fecha_proxima,
+            )
+
+        elif nombre_categoria == "mantenimiento general":
+            # Para mantenimiento general: crear recordatorio por FECHA (2 meses / 60 días desde fecha_entrega)
+            dias_interval = 60  # 2 meses
+            fecha_proxima = fecha_base + timedelta(days=dias_interval)
+
+            self._crear_o_actualizar_recordatorio(
+                moto=moto,
+                categoria=categoria,
+                tipo="fecha",
+                fecha_programada=fecha_proxima,
+            )
+
+    def _crear_o_actualizar_recordatorio(self, moto, categoria, tipo, **kwargs):
+        """
+        Crea o actualiza un recordatorio para evitar duplicados.
+        """
+        # Buscar recordatorio existente activo del mismo tipo
+        existente = RecordatorioMantenimiento.objects.filter(
+            moto=moto, categoria_servicio=categoria, tipo=tipo, activo=True
+        ).first()
+
+        if existente:
+            # Actualizar existente
+            if tipo == "km" and "km_proximo" in kwargs:
+                existente.km_proximo = kwargs["km_proximo"]
+            elif tipo == "fecha" and "fecha_programada" in kwargs:
+                existente.fecha_programada = kwargs["fecha_programada"]
+            existente.enviado = False  # Resetear flag de enviado
+            existente.save()
+        else:
+            # Crear nuevo
+            RecordatorioMantenimiento.objects.create(
+                moto=moto, categoria_servicio=categoria, tipo=tipo, **kwargs
+            )
+
+    def save(self, *args, **kwargs):
+        """Guardar y generar recordatorios automáticamente"""
+        # Primero guardar la instancia
+        super().save(*args, **kwargs)
+
+        # Luego generar recordatorios
+        try:
+            self.generar_recordatorios()
+        except Exception as e:
+            # Loguear error pero no interrumpir el guardado
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error al generar recordatorios: {e}")
+
 
 class RecordatorioMantenimiento(TimestampedModel):
+    """
+    Recordatorio para mantenimientos programados.
+
+    Tipos de recordatorio:
+    - km: Por kilometraje (ej: cambio de aceite cada 5000 km)
+    - fecha: Por fecha (ej: revisión cada 6 meses)
+
+    El sistema puede generar recordatorios automáticamente desde los servicios
+    realizados en mantenimientos.
+    """
+
+    TIPO_RECORDATORIO_CHOICES = [
+        ("km", "Por Kilometraje"),
+        ("fecha", "Por Fecha"),
+    ]
+
     moto = models.ForeignKey(
         Moto, on_delete=models.CASCADE, related_name="recordatorios"
     )
     categoria_servicio = models.ForeignKey(CategoriaServicio, on_delete=models.CASCADE)
-    fecha_programada = models.DateField()
+
+    tipo = models.CharField(
+        max_length=10, choices=TIPO_RECORDATORIO_CHOICES, default="fecha"
+    )
+
+    # Para fecha
+    fecha_programada = models.DateField(null=True, blank=True)
+
+    # Para KM
+    km_proximo = models.PositiveIntegerField(null=True, blank=True)
+
     enviado = models.BooleanField(default=False)
     activo = models.BooleanField(default=True)
     registrado_por = models.ForeignKey(
@@ -418,36 +851,131 @@ class RecordatorioMantenimiento(TimestampedModel):
         help_text="Usuario que registró el recordatorio",
     )
 
+    # Notas adicionales
+    notas = models.TextField(blank=True, help_text="Notas adicionales del recordatorio")
+
     class Meta:
         db_table = "recordatorio_mantenimiento"
         verbose_name = "Recordatorio de Mantenimiento"
         verbose_name_plural = "Recordatorios de Mantenimiento"
+        ordering = ["fecha_programada", "km_proximo"]
+        indexes = [
+            models.Index(fields=["moto", "activo"]),
+            models.Index(fields=["fecha_programada"]),
+        ]
 
     def __str__(self):
+        if self.tipo == "km":
+            return (
+                f"{self.moto.placa} - {self.categoria_servicio.nombre} "
+                f"(@ {self.km_proximo} km)"
+            )
         return (
-            f"{self.moto} - {self.categoria_servicio.nombre} ({self.fecha_programada})"
+            f"{self.moto.placa} - {self.categoria_servicio.nombre} "
+            f"({self.fecha_programada})"
         )
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.tipo == "km" and not self.km_proximo:
+            raise ValidationError(
+                "Debe definir km_proximo para recordatorios por kilometraje"
+            )
+
+        if self.tipo == "fecha" and self.fecha_programada:
+            raise ValidationError(
+                "Debe definir fecha_programada para recordatorios por fecha"
+            )
 
     def proximo(self, dias_antes=7):
         """
-        Indica si el mantenimiento es próximo dentro de 'dias_antes' días.
-        Devuelve un diccionario con:
-            - 'alerta': True/False si está dentro del rango de alerta
-            - 'dias_faltantes': días que faltan para la fecha programada
+        Indica si el mantenimiento es próximo dentro de 'dias_antes' días (para tipo='fecha')
+        o si el km próximo está cerca del km actual de la moto (para tipo='km').
+
+        Args:
+            dias_antes: Días de anticipación para activar alerta
+
+        Returns:
+            dict: {
+                'alerta': bool,
+                'dias_faltantes': int,
+                'km_faltantes': int,
+                'mensaje': str
+            }
         """
-        hoy = timezone.now().date()
-        inicio_alerta = self.fecha_programada - timezone.timedelta(days=dias_antes)
-        dias_faltantes = (self.fecha_programada - hoy).days
-
-        alerta = inicio_alerta <= hoy <= self.fecha_programada
-
-        return {
-            "alerta": alerta,
-            "dias_faltantes": max(dias_faltantes, 0),  # no devolver negativos
+        resultado = {
+            "alerta": False,
+            "dias_faltantes": 0,
+            "km_faltantes": 0,
+            "mensaje": "",
         }
+
+        if self.tipo == "fecha" and self.fecha_programada:
+            hoy = timezone.now().date()
+            inicio_alerta = self.fecha_programada - timezone.timedelta(days=dias_antes)
+            dias_faltantes = (self.fecha_programada - hoy).days
+
+            resultado["dias_faltantes"] = max(dias_faltantes, 0)
+            resultado["alerta"] = inicio_alerta <= hoy <= self.fecha_programada
+
+            if dias_faltantes < 0:
+                resultado["mensaje"] = (
+                    f"Recordatorio vencido hace {abs(dias_faltantes)} días"
+                )
+            elif dias_faltantes == 0:
+                resultado["mensaje"] = "Recordatorio para hoy"
+            else:
+                resultado["mensaje"] = f"Faltan {dias_faltantes} días"
+
+        elif self.tipo == "km" and self.km_proximo and self.moto:
+            km_actual = getattr(self.moto, "kilometraje", 0) or 0
+            km_faltantes = self.km_proximo - km_actual
+
+            # Alerta si faltan menos de 500 km
+            resultado["km_faltantes"] = max(km_faltantes, 0)
+            resultado["alerta"] = 0 < km_faltantes <= 500
+
+            if km_faltantes < 0:
+                resultado["mensaje"] = (
+                    f"Kilometraje excedido por {abs(km_faltantes)} km"
+                )
+            elif km_faltantes == 0:
+                resultado["mensaje"] = "Kilometraje alcanzado exactamente"
+            else:
+                resultado["mensaje"] = f"Faltan {km_faltantes} km"
+
+        return resultado
+
+    def esta_vencido(self):
+        """Verifica si el recordatorio está vencido"""
+        if self.tipo == "fecha" and self.fecha_programada:
+            return timezone.now().date() > self.fecha_programada
+        elif self.tipo == "km" and self.km_proximo and self.moto:
+            return self.moto.kilometraje >= self.km_proximo
+        return False
+
+    def marcar_enviado(self):
+        """Marca el recordatorio como enviado"""
+        self.enviado = True
+        self.save(update_fields=["enviado"])
+
+    def desactivar(self):
+        """Desactiva el recordatorio"""
+        self.activo = False
+        self.save(update_fields=["activo"])
 
 
 class RepuestoMantenimiento(TimestampedModel):
+    """
+    Repuesto utilizado en un mantenimiento.
+
+    Gestiona automáticamente:
+    - Cálculo de subtotal
+    - Control de stock (reducción al agregar, restauración al eliminar)
+    - Movimientos de inventario
+    """
+
     mantenimiento = models.ForeignKey(
         Mantenimiento, on_delete=models.CASCADE, related_name="repuestos"
     )
@@ -458,75 +986,125 @@ class RepuestoMantenimiento(TimestampedModel):
     precio_unitario = models.DecimalField(max_digits=10, decimal_places=2)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2)
 
+    # Configuración para validar stock (opcional)
+    permitir_sin_stock = models.BooleanField(
+        default=False,
+        help_text="Permitir usar repuesto aunque no haya stock disponible",
+    )
+
     class Meta:
         db_table = "repuesto_mantenimiento"
         verbose_name = "Repuesto de Mantenimiento"
         verbose_name_plural = "Repuestos de Mantenimiento"
 
+    def __str__(self):
+        return f"{self.producto.nombre} x{self.cantidad} (Mantenimiento {self.mantenimiento_id})"
+
+    def clean(self):
+        """Validaciones personalizadas"""
+        super().clean()
+
+        # Verificar stock si no se permite usar sin stock
+        if not self.permitir_sin_stock:
+            try:
+                inventario = self.producto.inventario
+                if inventario.stock_actual < self.cantidad:
+                    raise ValidationError(
+                        f"Stock insuficiente. Disponible: {inventario.stock_actual}, "
+                        f"Solicitado: {self.cantidad}"
+                    )
+            except Inventario.DoesNotExist:
+                raise ValidationError("El producto no tiene inventario configurado")
+
+    def tiene_stock_suficiente(self):
+        """Verifica si hay stock suficiente"""
+        try:
+            inventario = self.producto.inventario
+            return inventario.stock_actual >= self.cantidad
+        except Inventario.DoesNotExist:
+            return False
+
     def save(self, *args, **kwargs):
-        """Calcular subtotal automáticamente y actualizar stock"""
-        self.subtotal = self.cantidad * self.precio_unitario
+        """
+        Calcular subtotal automáticamente y actualizar stock.
+
+        Proceso:
+        1. Calcular subtotal
+        2. Validar stock (si aplica)
+        3. Guardar registro
+        4. Actualizar stock y crear movimiento
+        """
+        from decimal import Decimal
+
+        # Calcular subtotal
+        self.subtotal = Decimal(str(self.cantidad)) * Decimal(str(self.precio_unitario))
 
         # Si es una nueva instancia, actualizar stock
         is_new = self.pk is None
         if is_new:
             super().save(*args, **kwargs)
-            # Reducir stock del producto usado en mantenimiento
-            try:
-                inventario = self.producto.inventario
-                if inventario.stock_actual >= self.cantidad:
-                    inventario.stock_actual -= self.cantidad
-                    inventario.save(update_fields=["stock_actual"])
-
-                    # Crear movimiento de inventario
-                    InventarioMovimiento.objects.create(
-                        inventario=inventario,
-                        tipo="salida",
-                        cantidad=self.cantidad,
-                        motivo=f"Mantenimiento #{self.mantenimiento.id}",
-                        usuario=getattr(self.mantenimiento, "registrado_por", None),
-                    )
-                else:
-                    # Si no hay suficiente stock, usar lo disponible y registrar el problema
-                    InventarioMovimiento.objects.create(
-                        inventario=inventario,
-                        tipo="salida",
-                        cantidad=self.cantidad,
-                        motivo=f"Mantenimiento #{self.mantenimiento.id} - Stock insuficiente",
-                        usuario=getattr(self.mantenimiento, "registrado_por", None),
-                    )
-                    inventario.stock_actual = max(
-                        0, inventario.stock_actual - self.cantidad
-                    )
-                    inventario.save(update_fields=["stock_actual"])
-            except Inventario.DoesNotExist:
-                # Si no existe inventario para el producto, no hacer nada
-                pass
+            self._actualizar_stock("salida")
         else:
             super().save(*args, **kwargs)
 
-    def delete(self, *args, **kwargs):
-        # Restaurar stock cuando se elimina el repuesto del mantenimiento
+    def _actualizar_stock(self, tipo_movimiento):
+        """
+        Actualiza el stock del producto y crea el movimiento de inventario.
+
+        Args:
+            tipo_movimiento: 'salida' para reducir, 'entrada' para restaurar
+        """
         try:
             inventario = self.producto.inventario
-            inventario.stock_actual += self.cantidad
-            inventario.save(update_fields=["stock_actual"])
+
+            if tipo_movimiento == "salida":
+                # Reducir stock
+                stock_anterior = inventario.stock_actual
+                inventario.stock_actual = max(
+                    0, inventario.stock_actual - self.cantidad
+                )
+                inventario.save(update_fields=["stock_actual"])
+
+                # Determinar motivo
+                if inventario.stock_actual < self.cantidad:
+                    motivo = (
+                        f"Mantenimiento #{self.mantenimiento_id} - Stock insuficiente"
+                    )
+                else:
+                    motivo = f"Mantenimiento #{self.mantenimiento_id}"
+
+            else:  # entrada
+                # Restaurar stock
+                inventario.stock_actual += self.cantidad
+                inventario.save(update_fields=["stock_actual"])
+                motivo = f"Cancelación mantenimiento #{self.mantenimiento_id}"
 
             # Crear movimiento de inventario
             InventarioMovimiento.objects.create(
                 inventario=inventario,
-                tipo="entrada",
+                tipo=tipo_movimiento,
                 cantidad=self.cantidad,
-                motivo=f"Cancelación mantenimiento #{self.mantenimiento.id}",
-                usuario=getattr(self.mantenimiento, "registrado_por", None),
+                motivo=motivo,
+                usuario=getattr(self.mantenimiento, "creado_por", None),
             )
+
         except Inventario.DoesNotExist:
-            pass
+            # Si no existe inventario, registrar en logs
+            import logging
 
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"No se encontró inventario para el producto {self.producto_id} "
+                f"al {'agregar' if tipo_movimiento == 'salida' else 'eliminar'} repuesto"
+            )
+
+    def delete(self, *args, **kwargs):
+        """
+        Eliminar repuesto y restaurar stock.
+        """
+        # Restaurar stock antes de eliminar
+        self._actualizar_stock("entrada")
         super().delete(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.producto.nombre} x{self.cantidad} (Mantenimiento {self.mantenimiento.id})"
 
 
 # =======================================
@@ -541,10 +1119,14 @@ class Venta(models.Model):
     cliente = models.ForeignKey("Persona", on_delete=models.CASCADE)
     fecha_venta = models.DateTimeField(auto_now_add=True)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2)
+    descuento = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal("0.00")
+    )
     impuesto = models.DecimalField(
         max_digits=10, decimal_places=2, default=Decimal("0.00")
     )
     total = models.DecimalField(max_digits=10, decimal_places=2)
+    notas = models.TextField(blank=True, default="")
     estado = models.CharField(
         max_length=20,
         choices=[
@@ -555,6 +1137,13 @@ class Venta(models.Model):
         default="PENDIENTE",
     )
     eliminado = models.BooleanField(default=False)
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ventas_creadas",
+    )
     registrado_por = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -562,6 +1151,24 @@ class Venta(models.Model):
         blank=True,
         related_name="ventas_registradas",
     )
+    # Campos de trazabilidad/auditoría
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ventas_actualizadas",
+    )
+    eliminado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ventas_eliminadas",
+    )
+    fecha_eliminacion = models.DateTimeField(null=True, blank=True)
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "venta"
@@ -779,10 +1386,12 @@ class InventarioMovimiento(TimestampedModel):
 
         # Solo actualizar stock si es un movimiento manual (entrada, salida o ajuste directo)
         # Los movimientos desde ventas y mantenimientos ya actualizan el stock en sus propios modelos
+        # Tambien ignoramos "Stock inicial" porque ya se manejó en perform_create
         if is_new and not (
             "Venta #" in self.motivo
             or "Mantenimiento #" in self.motivo
             or "Cancelación" in self.motivo
+            or "Stock inicial" in self.motivo
         ):
             if self.tipo == "entrada":
                 self.inventario.stock_actual += self.cantidad
@@ -796,6 +1405,11 @@ class InventarioMovimiento(TimestampedModel):
 
 # =======================================
 # RECORDATORIOS
+# =======================================
+
+
+# =======================================
+# VENTAS - PRECIOS ESPECIALES POR CLIENTE
 # =======================================
 
 

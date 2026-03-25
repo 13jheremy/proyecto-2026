@@ -9,10 +9,12 @@ class IsAdministrador(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        # CORRECCIÓN: usar related_name 'roles'
-        return request.user.roles.filter(
-            rol__nombre="Administrador", activo=True
-        ).exists()
+        # Usar normalización a minúsculas para comparación consistente
+        roles = request.user.roles.filter(activo=True).values_list(
+            "rol__nombre", flat=True
+        )
+        roles_normalized = [role.lower() for role in roles]
+        return "administrador" in roles_normalized
 
 
 class IsEmpleado(permissions.BasePermission):
@@ -25,7 +27,9 @@ class IsEmpleado(permissions.BasePermission):
         roles = request.user.roles.filter(activo=True).values_list(
             "rol__nombre", flat=True
         )
-        return "Empleado" in roles or "Administrador" in roles
+        # Normalizar roles a minúsculas para comparación consistente
+        roles_normalized = [role.lower() for role in roles]
+        return "empleado" in roles_normalized or "administrador" in roles_normalized
 
 
 class IsTecnico(permissions.BasePermission):
@@ -38,9 +42,9 @@ class IsTecnico(permissions.BasePermission):
         roles = request.user.roles.filter(activo=True).values_list(
             "rol__nombre", flat=True
         )
-        # Normalizar roles a minúsculas para comparación
+        # Normalizar roles a minúsculas para comparación consistente
         roles_normalized = [role.lower() for role in roles]
-        return "técnico" in roles_normalized or "tecnico" in roles_normalized or "administrador" in roles_normalized or "Técnico" in roles or "Administrador" in roles
+        return "tecnico" in roles_normalized or "administrador" in roles_normalized
 
 
 class IsCliente(permissions.BasePermission):
@@ -53,7 +57,9 @@ class IsCliente(permissions.BasePermission):
         roles = request.user.roles.filter(activo=True).values_list(
             "rol__nombre", flat=True
         )
-        return "Cliente" in roles or "Administrador" in roles
+        # Normalizar roles a minúsculas para comparación consistente
+        roles_normalized = [role.lower() for role in roles]
+        return "cliente" in roles_normalized or "administrador" in roles_normalized
 
 
 class IsOwner(permissions.BasePermission):
@@ -97,16 +103,21 @@ class CustomPermission(permissions.BasePermission):
         if view.basename == "usuarios":
             is_employee = IsEmpleado().has_permission(request, view)
             # Bloquear acciones específicas para empleados
-            if is_employee and view.action in ['reset_password', 'cambiar_password', 'activate', 'deactivate']:
+            if is_employee and view.action in [
+                "reset_password",
+                "cambiar_password",
+                "activate",
+                "deactivate",
+            ]:
                 return False
             # Bloquear métodos PATCH/PUT que podrían cambiar estado activo
-            if is_employee and request.method in ['PATCH', 'PUT']:
+            if is_employee and request.method in ["PATCH", "PUT"]:
                 # Verificar si se está intentando cambiar el campo 'is_active'
-                if hasattr(request, 'data') and 'is_active' in request.data:
+                if hasattr(request, "data") and "is_active" in request.data:
                     return False
             result = is_employee or IsAdministrador().has_permission(request, view)
             return result
-        
+
         # Productos: empleados solo pueden VER (no crear/editar/eliminar)
         if view.basename == "productos":
             is_employee = IsEmpleado().has_permission(request, view)
@@ -128,7 +139,7 @@ class CustomPermission(permissions.BasePermission):
             # Empleados solo pueden VER (no crear/editar/eliminar) estos módulos
             if view.basename in [
                 "proveedores",
-                "servicios", 
+                "servicios",
                 "ventas",
                 "detalles-venta",
             ]:
@@ -152,27 +163,27 @@ class CustomPermission(permissions.BasePermission):
                     return True
                 # NO pueden crear ni eliminar mantenimientos
                 return False
-            
+
             # Técnicos pueden ver detalles de mantenimiento (solo lectura)
             if view.basename == "detalles-mantenimiento":
                 return request.method in permissions.SAFE_METHODS
-            
+
             # Técnicos pueden ver motos relacionadas con sus mantenimientos (solo lectura)
             if view.basename == "motos":
                 return request.method in permissions.SAFE_METHODS
-            
+
             # Técnicos pueden ver usuarios/clientes relacionados con sus mantenimientos (solo lectura)
             if view.basename == "usuarios":
                 return request.method in permissions.SAFE_METHODS
-            
+
             # Técnicos pueden ver productos/repuestos asignados a sus mantenimientos (solo lectura)
             if view.basename in ["productos", "inventario"]:
                 return request.method in permissions.SAFE_METHODS
-            
+
             # Técnicos pueden ver servicios que deben realizar (solo lectura)
             if view.basename == "servicios":
                 return request.method in permissions.SAFE_METHODS
-            
+
             # NO pueden acceder a ventas
             if view.basename in ["ventas", "detalles-venta", "pagos"]:
                 return False
@@ -204,7 +215,7 @@ class CustomPermission(permissions.BasePermission):
             return IsEmpleado().has_permission(
                 request, view
             ) or IsAdministrador().has_permission(request, view)
-        
+
         # Productos: empleados solo pueden VER objetos específicos
         if view.basename == "productos":
             is_employee = IsEmpleado().has_permission(request, view)
@@ -216,35 +227,43 @@ class CustomPermission(permissions.BasePermission):
         if IsTecnico().has_permission(request, view):
             if view.basename == "mantenimientos":
                 # Solo pueden ver/editar mantenimientos asignados a ellos
-                if hasattr(obj, 'tecnico_asignado'):
+                if hasattr(obj, "tecnico_asignado"):
                     return obj.tecnico_asignado == request.user
                 return False
-            
+
             if view.basename == "motos":
                 # Solo pueden ver motos que tienen mantenimientos asignados a ellos
-                return obj.mantenimiento_set.filter(tecnico_asignado=request.user).exists()
-            
+                return obj.mantenimiento_set.filter(
+                    tecnico_asignado=request.user
+                ).exists()
+
             if view.basename == "usuarios":
                 # Solo pueden ver clientes relacionados con sus mantenimientos
-                if hasattr(request.user, 'persona_asociada') and request.user.persona_asociada:
+                if (
+                    hasattr(request.user, "persona_asociada")
+                    and request.user.persona_asociada
+                ):
                     # Verificar si el usuario es propietario de una moto con mantenimiento asignado al técnico
-                    return obj.persona_asociada and obj.persona_asociada.moto_set.filter(
-                        mantenimiento__tecnico_asignado=request.user
-                    ).exists()
+                    return (
+                        obj.persona_asociada
+                        and obj.persona_asociada.moto_set.filter(
+                            mantenimiento__tecnico_asignado=request.user
+                        ).exists()
+                    )
                 return False
-            
+
             if view.basename in ["productos", "inventario"]:
                 # Solo pueden ver productos/inventario usados en sus mantenimientos
                 return obj.repuestos_usados.filter(
                     mantenimiento__tecnico_asignado=request.user
                 ).exists()
-            
+
             if view.basename == "servicios":
                 # Solo pueden ver servicios de sus mantenimientos asignados
                 return obj.detallemantenimiento_set.filter(
                     mantenimiento__tecnico_asignado=request.user
                 ).exists()
-            
+
             # Para otros casos, permitir acceso si es técnico
             return True
 

@@ -47,7 +47,9 @@ router.register(
     basename="detalle-mantenimiento",
 )
 router.register(
-    r"recordatorios-mantenimiento", RecordatorioMantenimientoViewSet, basename="recordatorio_mantenimiento"
+    r"recordatorios-mantenimiento",
+    RecordatorioMantenimientoViewSet,
+    basename="recordatorio_mantenimiento",
 )
 
 # =======================================
@@ -67,7 +69,10 @@ router.register(
     RepuestoMantenimientoViewSet,
     basename="repuesto-mantenimiento",
 )
-router.register(r"recordatorios", RecordatorioMantenimientoViewSet, basename="recordatorio")
+
+# =======================================
+# PRECIOS ESPECIALES POR CLIENTE
+# =======================================
 
 # =======================================
 # ENDPOINTS PÚBLICOS (SIN AUTENTICACIÓN)
@@ -163,6 +168,11 @@ urlpatterns = [
     # ENDPOINTS ESPECÍFICOS PARA CLIENTES
     # =======================================
     path("cliente/motos/", cliente_motos, name="cliente_motos"),
+    path(
+        "cliente/motos/<int:moto_id>/",
+        cliente_moto_detalle,
+        name="cliente_moto_detalle",
+    ),
     path("cliente/ventas/", cliente_ventas, name="cliente_ventas"),
     path(
         "cliente/mantenimientos/", cliente_mantenimientos, name="cliente_mantenimientos"
@@ -228,7 +238,11 @@ urlpatterns = [
     # NOTIFICACIONES PUSH
     # =======================================
     path("notifications/send/", send_notification, name="send_notification"),
-    path("notifications/test-maintenance/", test_maintenance_notifications, name="test_maintenance_notifications"),
+    path(
+        "notifications/test-maintenance/",
+        test_maintenance_notifications,
+        name="test_maintenance_notifications",
+    ),
     # =======================================
     # SALUD DEL SISTEMA
     # =======================================
