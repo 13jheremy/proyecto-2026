@@ -4855,8 +4855,8 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
 
         fecha_limite = timezone.now().date() + timedelta(days=dias)
 
+        # Incluir todos los recordatorios (activos e inactivos) para debugging
         queryset = queryset.filter(
-            activo=True,
             fecha_programada__lte=fecha_limite,
         )
 

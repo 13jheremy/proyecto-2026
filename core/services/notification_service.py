@@ -31,25 +31,31 @@ class FCMNotificationService:
     def _initialize_firebase(self):
         """Inicializar Firebase Admin SDK"""
         try:
+            import os
+
             # Verificar si Firebase ya está inicializado
             if not firebase_admin._apps:
-                # Usar las credenciales del archivo JSON o variables de entorno
-                if hasattr(settings, "FIREBASE_CREDENTIALS_PATH"):
-                    cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
-                    initialize_app(cred)
-                    logger.info("Firebase inicializado con archivo de credenciales")
-                elif hasattr(settings, "FIREBASE_CREDENTIALS_JSON"):
-                    # Para usar credenciales desde variables de entorno
-                    cred_dict = json.loads(settings.FIREBASE_CREDENTIALS_JSON)
-                    cred = credentials.Certificate(cred_dict)
-                    initialize_app(cred)
-                    logger.info("Firebase inicializado con credenciales JSON")
+
+                firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+
+                if firebase_json:
+                    try:
+                        cred_dict = json.loads(firebase_json)
+                        cred = credentials.Certificate(cred_dict)
+                        initialize_app(cred)
+                        logger.info("Firebase inicializado desde variable de entorno")
+                    except Exception as json_error:
+                        logger.error(
+                            f"Error parseando credenciales Firebase: {json_error}"
+                        )
                 else:
-                    logger.warning(
-                        "No se encontraron credenciales de Firebase configuradas"
+                    logger.error(
+                        "No se encontró la variable de entorno FIREBASE_CREDENTIALS"
                     )
+
             else:
                 logger.info("Firebase ya estaba inicializado")
+
         except Exception as e:
             logger.error(f"Error inicializando Firebase: {e}")
 
