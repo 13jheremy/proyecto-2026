@@ -4855,9 +4855,10 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
 
         fecha_limite = timezone.now().date() + timedelta(days=dias)
 
-        # Incluir todos los recordatorios (activos e inactivos) para debugging
+        # Incluir todos los recordatorios: con fecha o sin fecha (tipo km)
+        from django.db.models import Q
         queryset = queryset.filter(
-            fecha_programada__lte=fecha_limite,
+            Q(fecha_programada__isnull=True) | Q(fecha_programada__lte=fecha_limite)
         )
 
         # Si hay tipo, filtrar por tipo

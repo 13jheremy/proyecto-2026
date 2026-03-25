@@ -378,7 +378,7 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 FIREBASE_CREDENTIALS_PATH = config(
     "FIREBASE_CREDENTIALS_PATH", default=str(BASE_DIR / "firebase-service-account.json")
 )
-FIREBASE_CREDENTIALS_JSON = config("FIREBASE_CREDENTIALS_JSON", default="")
+FIREBASE_CREDENTIALS_JSON = config("FIREBASE_CREDENTIALS", default="")
 
 # =========================
 # CELERY CONFIGURATION
