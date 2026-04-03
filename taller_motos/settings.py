@@ -106,7 +106,6 @@ MIDDLEWARE = [
     "core.api.security_middleware.UserAgentValidationMiddleware",
     "core.api.security_middleware.RequestLoggingMiddleware",
 ]
-]
 
 ROOT_URLCONF = "taller_motos.urls"
 WSGI_APPLICATION = "taller_motos.wsgi.application"
