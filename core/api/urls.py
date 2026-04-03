@@ -7,6 +7,19 @@ from rest_framework.routers import DefaultRouter
 from .views import *
 from . import pos_views
 from .password_reset_views import PasswordResetRequestView, PasswordResetConfirmView
+from .health_checks import (
+    health_check,
+    database_health,
+    cache_health,
+    services_health,
+    system_metrics,
+)
+from .monitoring import (
+    api_stats,
+    system_performance,
+    error_logs,
+    system_alerts,
+)
 
 # =======================================
 # ROUTER PRINCIPAL
@@ -247,6 +260,17 @@ urlpatterns = [
     # SALUD DEL SISTEMA
     # =======================================
     path("health/", health_check, name="health_check"),
+    path("health/database/", database_health, name="database_health"),
+    path("health/cache/", cache_health, name="cache_health"),
+    path("health/services/", services_health, name="services_health"),
+    path("health/metrics/", system_metrics, name="system_metrics"),
+    # =======================================
+    # MONITORING Y LOGGING
+    # =======================================
+    path("monitoring/api-stats/", api_stats, name="api_stats"),
+    path("monitoring/performance/", system_performance, name="system_performance"),
+    path("monitoring/errors/", error_logs, name="error_logs"),
+    path("monitoring/alerts/", system_alerts, name="system_alerts"),
     # =======================================
     # RUTAS DEL ROUTER
     # =======================================

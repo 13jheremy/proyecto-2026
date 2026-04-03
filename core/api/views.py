@@ -39,6 +39,13 @@ from .permissions import (
     IsOwner,
     CustomPermission,
 )
+from .throttling import (
+    CustomUserRateThrottle,
+    CustomAnonRateThrottle,
+    AuthThrottle,
+    APIThrottle,
+    POSThrottle,
+)
 from ..services import fcm_service
 
 logger = logging.getLogger(__name__)
@@ -69,9 +76,11 @@ class BaseViewSet(viewsets.ModelViewSet):
     - Acciones comunes (activar, desactivar, etc.)
     - Logging de operaciones
     - Manejo de errores estandarizado
+    - Rate limiting integrado
     """
 
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [CustomUserRateThrottle, CustomAnonRateThrottle]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = []
     search_fields = []
@@ -464,6 +473,7 @@ class BaseViewSet(viewsets.ModelViewSet):
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [AuthThrottle, CustomAnonRateThrottle]
 
     def post(self, request, *args, **kwargs):
         try:
@@ -506,6 +516,7 @@ class MobileTokenObtainPairView(TokenObtainPairView):
 
     serializer_class = MobileTokenObtainPairSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [AuthThrottle, CustomAnonRateThrottle]
 
     def post(self, request, *args, **kwargs):
         try:
