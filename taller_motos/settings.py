@@ -98,6 +98,14 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Security middlewares personalizados
+    "core.api.security_middleware.SecurityHeadersMiddleware",
+    "core.api.security_middleware.SQLInjectionProtectionMiddleware",
+    "core.api.security_middleware.RequestSizeLimitMiddleware",
+    "core.api.security_middleware.IPBlocklistMiddleware",
+    "core.api.security_middleware.UserAgentValidationMiddleware",
+    "core.api.security_middleware.RequestLoggingMiddleware",
+]
 ]
 
 ROOT_URLCONF = "taller_motos.urls"
@@ -290,6 +298,10 @@ LOGGING = {
             "format": "{levelname} {message}",
             "style": "{",
         },
+        "json": {
+            "format": '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "module": "%(module)s", "message": "%(message)s"}',
+            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+        },
     },
     "handlers": {
         "console": {
@@ -297,9 +309,25 @@ LOGGING = {
             "formatter": "verbose" if DEBUG else "simple",
         },
         "file": {
-            "class": "logging.FileHandler",
+            "class": "logging.handlers.RotatingFileHandler",
             "filename": BASE_DIR / "logs" / "django.log",
+            "maxBytes": 10 * 1024 * 1024,  # 10MB
+            "backupCount": 5,
             "formatter": "verbose",
+        },
+        "security_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "security.log",
+            "maxBytes": 10 * 1024 * 1024,  # 10MB
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+        "api_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "api.log",
+            "maxBytes": 10 * 1024 * 1024,  # 10MB
+            "backupCount": 5,
+            "formatter": "json" if not DEBUG else "verbose",
         },
     },
     "root": {
@@ -318,12 +346,22 @@ LOGGING = {
             "propagate": False,
         },
         "django.request": {
-            "handlers": ["console"],
+            "handlers": ["console", "security_file"],
             "level": "DEBUG" if DEBUG else "INFO",
             "propagate": False,
         },
+        "django.security": {
+            "handlers": ["console", "security_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
         "core": {
-            "handlers": ["console", "file"] if not DEBUG else ["console"],
+            "handlers": ["console", "file", "api_file"] if not DEBUG else ["console"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+        "core.api": {
+            "handlers": ["console", "api_file"] if not DEBUG else ["console"],
             "level": "DEBUG" if DEBUG else "INFO",
             "propagate": False,
         },
@@ -350,6 +388,128 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     X_FRAME_OPTIONS = "DENY"
+
+# Configuraciones de seguridad adicionales (siempre activas)
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
+
+# =========================
+# RATE LIMITING CONFIGURATION
+# =========================
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "core.api.throttling.CustomUserRateThrottle",
+        "core.api.throttling.CustomAnonRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "1000/hour",
+        "anon": "100/hour",
+        "auth": "5/minute",
+        "api": "500/hour",
+        "pos": "2000/hour",
+    },
+    # Otras configuraciones existentes...
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "core.api.pagination.UsuarioPagination",
+    "DEFAULT_FILTER_BACKENDS": [
+        "django_filters.rest_framework.DjangoFilterBackend",
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+    ],
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser",
+        "rest_framework.parsers.MultiPartParser",
+        "rest_framework.parsers.FormParser",
+    ],
+}
+
+# =========================
+# CORS CONFIGURATION
+# =========================
+CORS_ALLOWED_ORIGINS = config(
+    "CORS_ALLOWED_ORIGINS",
+    default="http://localhost:3000,http://127.0.0.1:3000",
+    cast=lambda v: [s.strip() for s in v.split(",")]
+)
+
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
+
+# =========================
+# DATA VALIDATION SETTINGS
+# =========================
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
+DATA_UPLOAD_MAX_NUMBER_FILES = 10
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024  # 5MB
+
+# Validaciones de contraseña
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {
+            "min_length": 8,
+        },
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+    },
+]
+
+# =========================
+# SECURITY CONFIGURATIONS
+# =========================
+
+# Configuraciones de seguridad adicionales
+BLOCKED_IPS = config(
+    "BLOCKED_IPS",
+    default="",
+    cast=lambda v: [ip.strip() for ip in v.split(",") if ip.strip()]
+)
+
+MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10MB
+
+# Configuraciones de rate limiting avanzadas
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "user": config("THROTTLE_USER_RATE", default="1000/hour"),
+    "anon": config("THROTTLE_ANON_RATE", default="100/hour"),
+    "auth": config("THROTTLE_AUTH_RATE", default="5/minute"),
+    "api": config("THROTTLE_API_RATE", default="500/hour"),
+    "pos": config("THROTTLE_POS_RATE", default="2000/hour"),
+}
 
 # =========================
 # CACHE CONFIGURATION
