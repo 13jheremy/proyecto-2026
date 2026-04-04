@@ -88,5 +88,5 @@ wcwidth==0.2.13
 wheel==0.45.1
 whitenoise==6.6.0
 dj-database-url==2.1.0
-python-json-logger==2.0
+python-json-logger==2.0.7
 psutil==5.9.6.
