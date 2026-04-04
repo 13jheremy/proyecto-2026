@@ -19,14 +19,115 @@ import cloudinary
 # =========================
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# DEBUG debe ser False en producción
+DEBUG = config("DEBUG", default=True, cast=bool)
+
+# =========================
+# LOGGING IMPORTS AND FORMATTERS
+# =========================
+import logging
+
+# Formatter seguro para desarrollo
+LOGGING_FORMATTER_VERBOSE = {
+    "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+    "style": "{",
+}
+
+LOGGING_FORMATTER_SIMPLE = {
+    "format": "{levelname} {message}",
+    "style": "{",
+}
+
+# Formatter JSON solo si python-json-logger está disponible
+try:
+    from pythonjsonlogger import jsonlogger
+
+    LOGGING_FORMATTER_JSON = {
+        "format": '{"timestamp": "%(asctime)s", "level": "%(levelname)s", '
+        '"module": "%(module)s", "message": "%(message)s"}',
+        "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+    }
+    JSON_AVAILABLE = True
+except ModuleNotFoundError:
+    JSON_AVAILABLE = False
+    LOGGING_FORMATTER_JSON = LOGGING_FORMATTER_VERBOSE  # fallback
+
+# =========================
+# LOGGING CONFIGURATION
+# =========================
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": LOGGING_FORMATTER_VERBOSE,
+        "simple": LOGGING_FORMATTER_SIMPLE,
+        "json": LOGGING_FORMATTER_JSON,
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose" if DEBUG else "simple",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "django.log",
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+        "security_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "security.log",
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+        "api_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "api.log",
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "formatter": "json" if JSON_AVAILABLE and not DEBUG else "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "file"] if not DEBUG else ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console", "security_file"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["console", "security_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "core": {
+            "handlers": ["console", "file", "api_file"] if not DEBUG else ["console"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+        "core.api": {
+            "handlers": ["console", "api_file"] if not DEBUG else ["console"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+    },
+}
+
 # Usar variable de entorno para SECRET_KEY en producción
 SECRET_KEY = config(
     "SECRET_KEY",
     default="django-insecure-xfb(c+85v10xp-%-qs+s%-r7uia6nv4$%q+$=z(pz#&)%s8z7&",
 )
-
-# DEBUG debe ser False en producción
-DEBUG = config("DEBUG", default=True, cast=bool)
 
 # Hosts permitidos - configurar apropiadamente en producción
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")
@@ -107,6 +208,7 @@ MIDDLEWARE = [
     "core.api.security_middleware.RequestLoggingMiddleware",
 ]
 
+
 ROOT_URLCONF = "taller_motos.urls"
 WSGI_APPLICATION = "taller_motos.wsgi.application"
 
@@ -146,12 +248,12 @@ else:
     # 👉 Local
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": "taller_db",
-            "USER": "postgres",
-            "PASSWORD": "123456",
-            "HOST": "localhost",
-            "PORT": "5432",
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'mototaller',
+            'USER': 'mototaller_user',
+            'PASSWORD': 'yH1td9Ck7VZhAgq3f8kKrHB0iMICck8S',
+            'HOST': 'dpg-d784b6ea2pns73debon0-a.oregon-postgres.render.com',
+            'PORT': '5432',
         }
     }
 
@@ -187,6 +289,7 @@ DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 # =========================
 # CLOUDINARY
 # =========================
+# settings.py
 CLOUDINARY_CLOUD_NAME = config("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = config("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = config("CLOUDINARY_API_SECRET")
@@ -245,129 +348,6 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 ]
 
 # =========================
-# REST FRAMEWORK CONFIGURATION
-# =========================
-REST_FRAMEWORK = {
-    "DEFAULT_PAGINATION_CLASS": "core.api.pagination.UsuarioPagination",
-    "PAGE_SIZE": config("PAGE_SIZE", default=20, cast=int),
-    "DEFAULT_FILTER_BACKENDS": [
-        "django_filters.rest_framework.DjangoFilterBackend",
-        "rest_framework.filters.SearchFilter",
-        "rest_framework.filters.OrderingFilter",
-    ],
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "rest_framework.authentication.SessionAuthentication",  # Para admin
-    ],
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
-    "DEFAULT_RENDERER_CLASSES": [
-        "rest_framework.renderers.JSONRenderer",
-    ],
-    "DEFAULT_PARSER_CLASSES": [
-        "rest_framework.parsers.JSONParser",
-        "rest_framework.parsers.MultiPartParser",
-        "rest_framework.parsers.FormParser",
-    ],
-    # "EXCEPTION_HANDLER": "core.api.exceptions.custom_exception_handler",
-    "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-    ],
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": "100/hour",
-        "user": "1000/hour",
-        "login": "5/min",
-    },
-}
-
-# =========================
-# LOGGING CONFIGURATION
-# =========================
-LOGGING = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "verbose": {
-            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
-            "style": "{",
-        },
-        "simple": {
-            "format": "{levelname} {message}",
-            "style": "{",
-        },
-        "json": {
-            "format": '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "module": "%(module)s", "message": "%(message)s"}',
-            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "verbose" if DEBUG else "simple",
-        },
-        "file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": BASE_DIR / "logs" / "django.log",
-            "maxBytes": 10 * 1024 * 1024,  # 10MB
-            "backupCount": 5,
-            "formatter": "verbose",
-        },
-        "security_file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": BASE_DIR / "logs" / "security.log",
-            "maxBytes": 10 * 1024 * 1024,  # 10MB
-            "backupCount": 5,
-            "formatter": "verbose",
-        },
-        "api_file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": BASE_DIR / "logs" / "api.log",
-            "maxBytes": 10 * 1024 * 1024,  # 10MB
-            "backupCount": 5,
-            "formatter": "json" if not DEBUG else "verbose",
-        },
-    },
-    "root": {
-        "handlers": ["console"],
-        "level": "INFO",
-    },
-    "loggers": {
-        "django": {
-            "handlers": ["console", "file"] if not DEBUG else ["console"],
-            "level": "INFO",
-            "propagate": False,
-        },
-        "django.server": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": False,
-        },
-        "django.request": {
-            "handlers": ["console", "security_file"],
-            "level": "DEBUG" if DEBUG else "INFO",
-            "propagate": False,
-        },
-        "django.security": {
-            "handlers": ["console", "security_file"],
-            "level": "INFO",
-            "propagate": False,
-        },
-        "core": {
-            "handlers": ["console", "file", "api_file"] if not DEBUG else ["console"],
-            "level": "DEBUG" if DEBUG else "INFO",
-            "propagate": False,
-        },
-        "core.api": {
-            "handlers": ["console", "api_file"] if not DEBUG else ["console"],
-            "level": "DEBUG" if DEBUG else "INFO",
-            "propagate": False,
-        },
-    },
-}
-
-# =========================
 # AUTO FIELD
 # =========================
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
@@ -396,6 +376,8 @@ SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
 # RATE LIMITING CONFIGURATION
 # =========================
 REST_FRAMEWORK = {
+    "DEFAULT_PAGINATION_CLASS": "core.api.pagination.UsuarioPagination",
+    "PAGE_SIZE": config("PAGE_SIZE", default=20, cast=int),
     "DEFAULT_THROTTLE_CLASSES": [
         "core.api.throttling.CustomUserRateThrottle",
         "core.api.throttling.CustomAnonRateThrottle",
@@ -407,7 +389,6 @@ REST_FRAMEWORK = {
         "api": "500/hour",
         "pos": "2000/hour",
     },
-    # Otras configuraciones existentes...
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
@@ -415,7 +396,6 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
-    "DEFAULT_PAGINATION_CLASS": "core.api.pagination.UsuarioPagination",
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
