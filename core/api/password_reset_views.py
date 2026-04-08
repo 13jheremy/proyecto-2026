@@ -37,6 +37,7 @@ class PasswordResetRequestView(APIView):
 
             # Verificar que el usuario esté activo
             if not user.is_active:
+                logger.warning(f"Inactive user tried to reset password: {email}")
                 return Response(
                     {"error": "Cuenta inactiva. Contacta al administrador."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -44,6 +45,7 @@ class PasswordResetRequestView(APIView):
 
         except User.DoesNotExist:
             # Por seguridad, no revelamos si el usuario existe o no
+            logger.info(f"Non-existent user tried to reset password: {email}")
             return Response(
                 {
                     "message": "Si el correo existe en nuestro sistema, recibirás un enlace de recuperación."
@@ -51,25 +53,43 @@ class PasswordResetRequestView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # Generar token y uid
-        token = PasswordResetTokenGenerator().make_token(user)
-        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        except Exception as e:
+            logger.error(f"Error finding user {email}: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Error al procesar tu solicitud. Intenta nuevamente."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # Crear enlace de recuperación
-        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
-        reset_link = f"{frontend_url}/reset-password/{uid}/{token}"
+        try:
+            # Generar token y uid
+            token = PasswordResetTokenGenerator().make_token(user)
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
 
-        # Enviar correo de forma ASÍNCRONA para no bloquear el worker
-        # Esto se ejecuta en background sin esperar a que termine
-        send_password_reset_email(user, reset_link)
-        logger.info(f"Password reset email queued for {email} (enviando en background)")
+            # Crear enlace de recuperación
+            frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
+            reset_link = f"{frontend_url}/reset-password/{uid}/{token}"
 
-        return Response(
-            {
-                "message": "Si el correo existe en nuestro sistema, recibirás un enlace de recuperación."
-            },
-            status=status.HTTP_200_OK,
-        )
+            # Enviar correo de forma ASÍNCRONA para no bloquear el worker
+            # Esto se ejecuta en background sin esperar a que termine
+            send_password_reset_email(user, reset_link)
+            logger.info(f"✓ Password reset email queued for {email}")
+
+            return Response(
+                {
+                    "message": "Si el correo existe en nuestro sistema, recibirás un enlace de recuperación."
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(
+                f"✗ Unexpected error in password reset for {email}: {str(e)}",
+                exc_info=True
+            )
+            return Response(
+                {"error": "Error al procesar tu solicitud. Intenta nuevamente."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class PasswordResetConfirmView(APIView):
