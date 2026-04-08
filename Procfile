@@ -1,1 +1,1 @@
-web: gunicorn taller_motos.wsgi
+web: gunicorn taller_motos.wsgi --timeout 120 --workers 2

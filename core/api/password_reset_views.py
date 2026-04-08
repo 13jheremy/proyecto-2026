@@ -2,13 +2,13 @@
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.core.mail import send_mail
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.permissions import AllowAny
+from core.services.email_service import send_password_reset_email
 import logging
 
 logger = logging.getLogger(__name__)
@@ -59,38 +59,10 @@ class PasswordResetRequestView(APIView):
         frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
         reset_link = f"{frontend_url}/reset-password/{uid}/{token}"
 
-        # Enviar correo
-        try:
-            send_mail(
-                subject="Recuperación de Contraseña - JIC Taller y Repuestos de Motos",
-                message=f"""
-Hola {user.username},
-
-Has solicitado recuperar tu contraseña para el sistema de JIC Taller y Repuestos de Motos.
-
-Usa este enlace para cambiar tu contraseña:
-{reset_link}
-
-Este enlace expirará en 24 horas por seguridad.
-
-Si no solicitaste este cambio, puedes ignorar este correo.
-
-Saludos,
-Equipo de JIC Taller y Repuestos de Motos
-                """,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[user.correo_electronico],
-                fail_silently=False,
-            )
-
-            logger.info(f"Password reset email sent to {email}")
-
-        except Exception as e:
-            logger.error(f"Error sending password reset email to {email}: {str(e)}")
-            return Response(
-                {"error": "Error al enviar el correo. Intenta nuevamente más tarde."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        # Enviar correo de forma ASÍNCRONA para no bloquear el worker
+        # Esto se ejecuta en background sin esperar a que termine
+        send_password_reset_email(user, reset_link)
+        logger.info(f"Password reset email queued for {email} (enviando en background)")
 
         return Response(
             {
