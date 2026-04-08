@@ -12,6 +12,23 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
+def _validate_email_config():
+    """Valida que la configuración de email sea correcta."""
+    required_settings = ['EMAIL_HOST', 'EMAIL_HOST_USER', 'EMAIL_HOST_PASSWORD']
+    missing = []
+    
+    for setting in required_settings:
+        value = getattr(settings, setting, '')
+        if not value or value == '':
+            missing.append(setting)
+    
+    if missing:
+        logger.error(f"Email configuration incomplete. Missing: {', '.join(missing)}")
+        return False
+    
+    return True
+
+
 def send_email_async(**kwargs):
     """
     Envía un correo de forma asíncrona usando threading.
@@ -37,15 +54,20 @@ def send_email_async(**kwargs):
     
     def _send():
         try:
+            # Validar configuración de email
+            if not _validate_email_config():
+                logger.error(f"Email config invalid. Cannot send email to {kwargs.get('recipient_list')}")
+                return
+            
             # Establecer from_email por defecto si no se proporciona
             kwargs.setdefault('from_email', settings.DEFAULT_FROM_EMAIL)
             kwargs.setdefault('fail_silently', False)
             
             send_mail(**kwargs)
-            logger.info(f"Email enviado a {kwargs.get('recipient_list')}")
+            logger.info(f"✓ Email sent successfully to {kwargs.get('recipient_list')}")
             
         except Exception as e:
-            logger.error(f"Error enviando email a {kwargs.get('recipient_list')}: {str(e)}")
+            logger.error(f"✗ Error sending email to {kwargs.get('recipient_list')}: {str(e)}", exc_info=True)
     
     # Crear y ejecutar thread en background
     thread = threading.Thread(target=_send, daemon=True)
@@ -60,6 +82,10 @@ def send_password_reset_email(user, reset_link):
         user: Objeto de usuario de Django
         reset_link: URL del enlace de recuperación
     """
+    
+    if not user or not user.correo_electronico:
+        logger.error(f"Cannot send password reset email: Invalid user or email")
+        return
     
     message = f"""
 Hola {user.username},
@@ -77,6 +103,8 @@ Saludos,
 Equipo de JIC Taller y Repuestos de Motos
     """
     
+    logger.info(f"📧 Queuing password reset email for {user.correo_electronico}")
+    
     send_email_async(
         subject="Recuperación de Contraseña - JIC Taller y Repuestos de Motos",
         message=message,
@@ -93,6 +121,10 @@ def send_welcome_email(user, password=None):
         user: Objeto de usuario de Django
         password: Contraseña temporal (si aplica)
     """
+    
+    if not user or not user.correo_electronico:
+        logger.error(f"Cannot send welcome email: Invalid user or email")
+        return
     
     password_info = f"\nContraseña temporal: {password}\n" if password else ""
     
@@ -113,9 +145,12 @@ Saludos,
 Equipo de JIC Taller y Repuestos de Motos
     """
     
+    logger.info(f"📧 Queuing welcome email for {user.correo_electronico}")
+    
     send_email_async(
         subject="Bienvenido a JIC Taller y Repuestos de Motos",
         message=message,
         recipient_list=[user.correo_electronico],
         fail_silently=False
     )
+
