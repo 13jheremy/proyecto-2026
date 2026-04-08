@@ -318,7 +318,7 @@ if DEBUG:
 else:
     CORS_ALLOWED_ORIGINS = config(
         "CORS_ALLOWED_ORIGINS",
-        default="https://proyecto-2026-ts4b.onrender.com,https://frontend-proyecto-2026.vercel.app",  # Añade tu URL de Vercel aquí
+        default="https://proyecto-2026-ts4b.onrender.com,https://frontend-proyecto-2026.vercel.app",
     ).split(",")
 
 CORS_ALLOWED_HEADERS = [
@@ -410,37 +410,6 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.FormParser",
     ],
 }
-
-# =========================
-# CORS CONFIGURATION
-# =========================
-CORS_ALLOWED_ORIGINS = config(
-    "CORS_ALLOWED_ORIGINS",
-    default="http://localhost:3000,http://127.0.0.1:3000",
-    cast=lambda v: [s.strip() for s in v.split(",")]
-)
-
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_METHODS = [
-    "DELETE",
-    "GET",
-    "OPTIONS",
-    "PATCH",
-    "POST",
-    "PUT",
-]
-
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "content-type",
-    "dnt",
-    "origin",
-    "user-agent",
-    "x-csrftoken",
-    "x-requested-with",
-]
 
 # =========================
 # DATA VALIDATION SETTINGS
@@ -546,7 +515,7 @@ EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@tallermotos.com")
 
 # Frontend URL for password reset links
-FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
+FRONTEND_URL = config("FRONTEND_URL", default="https://frontend-proyecto-2026.vercel.app")
 
 # =========================
 # PERFORMANCE SETTINGS
