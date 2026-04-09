@@ -3936,14 +3936,8 @@ class ServicioViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
 
-        # Filtro específico para técnicos - solo servicios de sus mantenimientos asignados
-        if IsTecnico().has_permission(
-            self.request, self
-        ) and not IsAdministrador().has_permission(self.request, self):
-            qs = qs.filter(
-                detallemantenimiento__mantenimiento__tecnico_asignado=self.request.user
-            ).distinct()
-            return qs
+        # Los técnicos pueden ver todos los servicios activos (no solo los de sus mantenimientos)
+        # Esto les permite crear, editar y gestionar servicios del catálogo
 
         # -------------------------
         # Filtro por 'eliminado' - Similar a ProductoViewSet
