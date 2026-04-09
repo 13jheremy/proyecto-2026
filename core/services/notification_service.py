@@ -83,6 +83,12 @@ class FCMNotificationService:
             bool: True si se envió correctamente, False en caso contrario
         """
         logger.info(f"Enviando notificación: {title}")
+        
+        # DEBUG: Mostrar información del token recibido
+        logger.info(f"🔑 DEBUG TOKEN FCM - Longitud: {len(token) if token else 0}")
+        logger.info(f"🔑 DEBUG TOKEN FCM - Primeros 50 caracteres: {token[:50] if token else 'None'}")
+        logger.info(f"🔑 DEBUG TOKEN FCM - ¿Es None?: {token is None}")
+        logger.info(f"🔑 DEBUG TOKEN FCM - ¿Está vacío?: {not token}")
 
         # Verificar que Firebase está inicializado
         if not firebase_admin._apps:

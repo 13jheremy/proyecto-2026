@@ -152,10 +152,65 @@ class MantenimientoService:
             km_proximo_cambio=data.get("km_proximo_cambio"),
         )
 
+        # Crear recordatorio automáticamente si el servicio es de "cambio de aceite" o "mantenimiento general"
+        cls._crear_recordatorio_si_aplica(mantenimiento, servicio, data)
+
         # Recalcular total
         mantenimiento.calcular_total()
 
         return detalle
+
+    @classmethod
+    def _crear_recordatorio_si_aplica(cls, mantenimiento, servicio, data):
+        """
+        Crea un recordatorio automáticamente si el servicio es de cambio de aceite
+        o mantenimiento general.
+        """
+        from core.models import CategoriaServicio
+        from datetime import timedelta
+
+        nombre_categoria = servicio.categoria_servicio.nombre.lower() if servicio.categoria_servicio else ""
+        
+        # Categorías que generan recordatorio automático
+        categorias_con_recordatorio = ["cambio de aceite", "mantenimiento general", "aceite", "mantenimiento"]
+        
+        # Verificar si la categoría del servicio genera recordatorio
+        debe_crear = any(cat in nombre_categoria for cat in categorias_con_recordatorio)
+        
+        if not debe_crear:
+            return  # No crear recordatorio
+
+        # Obtener km_proximo del data o usar valores por defecto
+        km_proximo = data.get("km_proximo")
+        if not km_proximo:
+            moto = mantenimiento.moto
+            kilometraje_actual = kilometraje_salida = data.get("km_proximo_cambio")
+            if kilometraje_actual:
+                # Calcular próximo cambio: 5000km para aceite, 10000km para mantenimiento general
+                km_adicional = 5000 if "aceite" in nombre_categoria else 10000
+                km_proximo = kilometraje_actual + km_adicional
+            elif moto.kilometraje:
+                km_adicional = 5000 if "aceite" in nombre_categoria else 10000
+                km_proximo = moto.kilometraje + km_adicional
+
+        # Usar el tipo de recordatorio según la categoría
+        tipo_recordatorio = "km" if km_proximo else "fecha"
+        
+        # Calcular fecha programada: 3 meses para aceite, 6 meses para mantenimiento general
+        fecha_programada = None
+        if not km_proximo:
+            meses = 3 if "aceite" in nombre_categoria else 6
+            fecha_programada = timezone.now().date() + timedelta(days=meses * 30)
+
+        # Crear el recordatorio
+        RecordatorioMantenimiento.objects.create(
+            moto=mantenimiento.moto,
+            categoria_servicio=servicio.categoria_servicio,
+            tipo=tipo_recordatorio,
+            km_proximo=km_proximo,
+            fecha_programada=fecha_programada,
+            notas=f"Recordatorio automático creado al realizar {servicio.nombre}"
+        )
 
     @classmethod
     def agregar_repuesto(cls, mantenimiento, data, validar_stock=True):

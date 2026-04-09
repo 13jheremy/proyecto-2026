@@ -609,9 +609,19 @@ class UsuarioMeView(APIView):
             fcm_token = request.data.get("fcm_token")
 
             if fcm_token:
+                # DEBUG: Mostrar información del token FCM recibido
+                logger.info(f"🔑 [DEBUG] Token FCM recibido - Longitud: {len(fcm_token)}")
+                logger.info(f"🔑 [DEBUG] Token FCM - Primeros 30 chars: {fcm_token[:30]}")
+                logger.info(f"🔑 [DEBUG] Token FCM - Últimos 30 chars: {fcm_token[-30:]}")
+                
                 request.user.fcm_token = fcm_token
                 request.user.save(update_fields=["fcm_token"])
                 logger.info(f"Token FCM actualizado para usuario {request.user.id}")
+                
+                # Verificar que se guardó correctamente
+                request.user.refresh_from_db()
+                logger.info(f"✅ [DEBUG] Token FCM guardado en BD - Longitud: {len(request.user.fcm_token) if request.user.fcm_token else 0}")
+                
                 return Response({"message": "Token FCM actualizado correctamente"})
             else:
                 logger.warning(
@@ -7109,6 +7119,10 @@ class RecordatorioMantenimientoViewSet(BaseViewSet):
 
             if not usuario.fcm_token:
                 logger.error("El usuario no tiene token FCM registrado")
+                logger.error(f"🔍 [DEBUG] Usuario ID: {usuario.id}, username: {usuario.username}")
+            else:
+                logger.info(f"🔑 [DEBUG] Token del usuario - Longitud: {len(usuario.fcm_token)}")
+                logger.info(f"🔑 [DEBUG] Token - Primeros 30: {usuario.fcm_token[:30]}")
                 return Response(
                     {
                         "error": "El usuario no tiene token FCM registrado. Debe iniciar sesión en la app móvil primero."
