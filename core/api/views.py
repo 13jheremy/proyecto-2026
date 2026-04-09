@@ -3188,8 +3188,8 @@ class CategoriaViewSet(BaseViewSet):
         if self.action in ["list", "retrieve"]:
             permission_classes = [permissions.IsAuthenticated]
         elif self.action in ["create", "update", "partial_update"]:
-            permission_classes = [IsEmpleado | IsAdministrador]
-        elif self.action in ["destroy", "soft_delete", "restore", "toggle_activo"]:
+            permission_classes = [IsTecnico | IsEmpleado | IsAdministrador]
+        elif self.action in ["destroy", "soft_delete", "restore"]:
             permission_classes = [IsAdministrador]
         else:
             permission_classes = [IsAdministrador]
