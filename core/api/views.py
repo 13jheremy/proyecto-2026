@@ -761,6 +761,14 @@ def dashboard_stats(request):
             logger.error(f"Error calculando productos_stock_bajo: {e}")
             productos_stock_bajo = 0
 
+        try:
+            productos_destacados = Producto.objects.filter(
+                destacado=True, activo=True, eliminado=False
+            ).count()
+        except Exception as e:
+            logger.error(f"Error calculando productos_destacados: {e}")
+            productos_destacados = 0
+
         stats = {
             "total_productos": total_productos,
             "total_clientes": total_clientes,
@@ -771,6 +779,7 @@ def dashboard_stats(request):
             "ingresos_mes": float(ingresos_mes),
             "ingresos_netos_mes": float(ingresos_netos_mes),
             "productos_stock_bajo": productos_stock_bajo,
+            "productos_destacados": productos_destacados,
         }
 
         logger.info(f"Dashboard stats generadas para usuario {request.user.id}")
@@ -4059,13 +4068,10 @@ class MotoViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
 
-        # Filtro específico para técnicos - solo motos con mantenimientos asignados a ellos
-        if IsTecnico().has_permission(
-            self.request, self
-        ) and not IsAdministrador().has_permission(self.request, self):
-            qs = qs.filter(mantenimiento__tecnico_asignado=self.request.user).distinct()
-            return qs
-
+        # Filtro específico para técnicos - pueden ver todas las motorcycles
+        # Removed filtro restrictivo - técnicos ahora pueden ver todas las bikes
+        # para que puedan crear nuevas y trabajar con todas
+        
         # Filtro específico para clientes - solo sus motos
         if IsCliente().has_permission(
             self.request, self
