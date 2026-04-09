@@ -3160,6 +3160,7 @@ class CategoriaViewSet(BaseViewSet):
     search_fields = ["nombre", "descripcion"]
     filterset_fields = ["activo"]
     ordering = ["nombre"]
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
@@ -3341,6 +3342,7 @@ class CategoriaServicioViewSet(BaseViewSet):
     search_fields = ["nombre", "descripcion"]
     filterset_fields = ["activo"]
     ordering = ["nombre"]
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
