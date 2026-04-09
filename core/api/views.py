@@ -3162,6 +3162,19 @@ class CategoriaViewSet(BaseViewSet):
     ordering = ["nombre"]
     pagination_class = StandardResultsSetPagination
 
+    def list(self, request, *args, **kwargs):
+        """Sobreescribir el método list para manejar paginación correctamente"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Aplicar paginación
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
             permission_classes = [permissions.IsAuthenticated]
@@ -3343,6 +3356,19 @@ class CategoriaServicioViewSet(BaseViewSet):
     filterset_fields = ["activo"]
     ordering = ["nombre"]
     pagination_class = StandardResultsSetPagination
+
+    def list(self, request, *args, **kwargs):
+        """Sobreescribir el método list para manejar paginación correctamente"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Aplicar paginación
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def get_permissions(self):
         if self.action in ["list", "retrieve"]:
