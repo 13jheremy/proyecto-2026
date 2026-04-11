@@ -180,7 +180,6 @@ def crear_venta_pos(request):
                 "productos": [
                     {
                         "producto_id": item["producto"].id,
-                        "codigo": item["producto"].codigo,
                         "nombre": item["producto"].nombre,
                         "cantidad": item["cantidad"],
                         "precio_unitario": str(item["precio_unitario"]),
@@ -333,8 +332,7 @@ def buscar_productos_pos(request):
 
         if query:
             filters &= (
-                Q(codigo__icontains=query)
-                | Q(nombre__icontains=query)
+                Q(nombre__icontains=query)
                 | Q(descripcion__icontains=query)
             )
 
@@ -374,7 +372,6 @@ def buscar_productos_pos(request):
             results.append(
                 {
                     "id": producto.id,
-                    "codigo": producto.codigo,
                     "nombre": producto.nombre,
                     "descripcion": producto.descripcion,
                     "precio_venta": str(producto.precio_venta),
@@ -774,7 +771,6 @@ def crear_mantenimiento_pos(request):
                 "repuestos": [
                     {
                         "producto_id": repuesto.producto.id,
-                        "codigo": repuesto.producto.codigo,
                         "nombre": repuesto.producto.nombre,
                         "cantidad": repuesto.cantidad,
                         "precio_unitario": str(repuesto.precio_unitario),
@@ -1072,7 +1068,6 @@ def alertas_inventario(request):
             "sin_stock": [
                 {
                     "producto_id": inv.producto.id,
-                    "codigo": inv.producto.codigo,
                     "nombre": inv.producto.nombre,
                     "categoria": inv.producto.categoria.nombre,
                     "stock_actual": inv.stock_actual,
@@ -1083,7 +1078,6 @@ def alertas_inventario(request):
             "stock_bajo": [
                 {
                     "producto_id": inv.producto.id,
-                    "codigo": inv.producto.codigo,
                     "nombre": inv.producto.nombre,
                     "categoria": inv.producto.categoria.nombre,
                     "stock_actual": inv.stock_actual,
@@ -1151,7 +1145,6 @@ def ajustar_inventario(request):
 
             response_data = {
                 "producto_id": inventario.producto.id,
-                "codigo": inventario.producto.codigo,
                 "nombre": inventario.producto.nombre,
                 "stock_anterior": stock_anterior,
                 "stock_nuevo": nuevo_stock,

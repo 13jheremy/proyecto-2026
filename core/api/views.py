@@ -3596,7 +3596,7 @@ class ProductoViewSet(BaseViewSet):
         "eliminado_por__persona_asociada",
     ).all()
     serializer_class = ProductoSerializer
-    search_fields = ["nombre", "codigo", "descripcion"]
+    search_fields = ["nombre", "descripcion"]
     filterset_fields = ["categoria", "proveedor", "activo", "destacado"]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     ordering = ["-fecha_registro"]
@@ -3651,7 +3651,6 @@ class ProductoViewSet(BaseViewSet):
         if search:
             queryset = queryset.filter(
                 models.Q(nombre__icontains=search)
-                | models.Q(codigo__icontains=search)
                 | models.Q(descripcion__icontains=search)
             ).distinct()
 
@@ -5034,7 +5033,7 @@ class RepuestoMantenimientoViewSet(viewsets.ModelViewSet):
     queryset = RepuestoMantenimiento.objects.select_related("mantenimiento", "producto")
     serializer_class = RepuestoMantenimientoSerializer
     filter_backends = [filters.SearchFilter, DjangoFilterBackend]
-    search_fields = ["producto__nombre", "producto__codigo"]
+    search_fields = ["producto__nombre"]
     filterset_fields = ["mantenimiento", "producto"]
 
     def perform_create(self, serializer):
@@ -5476,7 +5475,6 @@ class VentaViewSet(BaseViewSet):
             # Aplicar búsqueda
             productos = productos.filter(
                 models.Q(nombre__icontains=query)
-                | models.Q(codigo__icontains=query)
                 | models.Q(descripcion__icontains=query)
             )
 
@@ -5512,7 +5510,6 @@ class VentaViewSet(BaseViewSet):
                 results.append(
                     {
                         "id": producto.id,
-                        "codigo": producto.codigo,
                         "nombre": producto.nombre,
                         "descripcion": producto.descripcion,
                         "precio_venta": str(producto.precio_venta),
@@ -5542,7 +5539,7 @@ class VentaViewSet(BaseViewSet):
                         ),
                         "imagen_url": producto.imagen.url if producto.imagen else None,
                         "disponible": stock_actual > 0,
-                        "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {stock_actual})",
+                        "display_text": f"{producto.nombre} (Stock: {stock_actual})",
                     }
                 )
 
@@ -5636,7 +5633,6 @@ class VentaViewSet(BaseViewSet):
             stock_info = {
                 "id": producto.id,
                 "nombre": producto.nombre,
-                "codigo": producto.codigo,
                 "stock_actual": stock_actual,
                 "stock_minimo": stock_minimo,
                 "disponible": stock_actual > 0,
@@ -6572,7 +6568,6 @@ def buscar_productos(request):
             "categoria", "proveedor", "inventario"
         ).filter(
             Q(id__icontains=query)
-            | Q(codigo__icontains=query)
             | Q(nombre__icontains=query)
             | Q(categoria__nombre__icontains=query),
             eliminado=False,
@@ -6595,7 +6590,6 @@ def buscar_productos(request):
             results.append(
                 {
                     "id": producto.id,
-                    "codigo": producto.codigo,
                     "nombre": producto.nombre,
                     "descripcion": producto.descripcion,
                     "precio_venta": str(producto.precio_venta),
@@ -6619,7 +6613,7 @@ def buscar_productos(request):
                     ),
                     "stock_disponible": stock_actual > 0,
                     "stock_bajo": stock_actual <= stock_minimo,
-                    "display_text": f"{producto.codigo} - {producto.nombre} (Stock: {stock_actual})",
+                    "display_text": f"{producto.nombre} (Stock: {stock_actual})",
                 }
             )
 

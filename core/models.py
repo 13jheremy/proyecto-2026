@@ -320,7 +320,6 @@ class Proveedor(TimestampedModel):
 # =======================================
 class Producto(TimestampedModel):
     nombre = models.CharField(max_length=200)
-    codigo = models.CharField(max_length=50, unique=True)
     descripcion = models.TextField(blank=True)
     categoria = models.ForeignKey(Categoria, on_delete=models.CASCADE)
     proveedor = models.ForeignKey(
@@ -342,7 +341,7 @@ class Producto(TimestampedModel):
         verbose_name_plural = "Productos"
 
     def __str__(self):
-        return f"{self.codigo} - {self.nombre}"
+        return self.nombre
 
 
 # =======================================

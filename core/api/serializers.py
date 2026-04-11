@@ -1096,7 +1096,6 @@ class ProductoSerializer(BaseModelSerializer):
         fields = [
             "id",
             "nombre",
-            "codigo",
             "descripcion",
             "categoria",
             "proveedor",
@@ -1187,15 +1186,6 @@ class ProductoSerializer(BaseModelSerializer):
             return obj.inventario.stock_minimo
         except Inventario.DoesNotExist:
             return 0
-
-    def validate_codigo(self, value):
-        """Validar unicidad del código"""
-        if self.instance and self.instance.codigo == value:
-            return value
-
-        if Producto.objects.filter(codigo=value).exists():
-            raise serializers.ValidationError("Ya existe un producto con este código")
-        return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -2216,7 +2206,6 @@ class RepuestoMantenimientoSerializer(serializers.ModelSerializer):
 
     # Mostrar información del producto
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True)
     producto_imagen = serializers.SerializerMethodField()
     stock_disponible = serializers.SerializerMethodField()
     tiene_stock_suficiente = serializers.SerializerMethodField()
@@ -2228,7 +2217,6 @@ class RepuestoMantenimientoSerializer(serializers.ModelSerializer):
             "mantenimiento",
             "producto",
             "producto_nombre",
-            "producto_codigo",
             "producto_imagen",
             "cantidad",
             "precio_unitario",
@@ -2604,7 +2592,6 @@ class ProductoPOSSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "nombre",
-            "codigo",
             "precio_venta",
             "categoria_nombre",
             "disponible",
@@ -2721,7 +2708,6 @@ VentaSerializer.Meta.fields.append("pagos")
 # =======================================
 class InventarioSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.SerializerMethodField(read_only=True)
-    producto_codigo = serializers.SerializerMethodField(read_only=True)
     producto_imagen = serializers.SerializerMethodField(read_only=True)
     stock_actual = serializers.IntegerField(required=True, min_value=0)
     stock_minimo = serializers.IntegerField(required=True, min_value=0)
@@ -2733,9 +2719,6 @@ class InventarioSerializer(serializers.ModelSerializer):
 
     def get_producto_nombre(self, obj):
         return obj.producto.nombre if obj.producto else "Producto no disponible"
-
-    def get_producto_codigo(self, obj):
-        return obj.producto.codigo if obj.producto else "N/A"
 
     def get_producto_imagen(self, obj):
         if obj.producto and obj.producto.imagen:
@@ -2796,7 +2779,6 @@ class InventarioSerializer(serializers.ModelSerializer):
             "id",
             "producto",
             "producto_nombre",
-            "producto_codigo",
             "producto_imagen",
             "stock_actual",
             "stock_minimo",
@@ -2847,9 +2829,6 @@ class InventarioMovimientoSerializer(serializers.ModelSerializer):
     )
     producto_nombre = serializers.CharField(
         source="inventario.producto.nombre", read_only=True
-    )
-    producto_codigo = serializers.CharField(
-        source="inventario.producto.codigo", read_only=True
     )
 
     # Campos de auditoría
@@ -2911,7 +2890,6 @@ class InventarioMovimientoSerializer(serializers.ModelSerializer):
             "id",
             "inventario",
             "producto_nombre",
-            "producto_codigo",
             "tipo",
             "cantidad",
             "motivo",
