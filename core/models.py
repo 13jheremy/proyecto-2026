@@ -343,6 +343,90 @@ class Producto(TimestampedModel):
     def __str__(self):
         return self.nombre
 
+    def stock_total(self):
+        from django.db.models import Sum
+        result = self.lotes.aggregate(total=Sum('cantidad_disponible'))
+        return result['total'] or 0
+
+
+# =======================================
+# LOTES (Inventario por lotes - FIFO)
+# =======================================
+class Lote(TimestampedModel):
+    producto = models.ForeignKey(
+        Producto, 
+        on_delete=models.CASCADE, 
+        related_name="lotes"
+    )
+    cantidad_disponible = models.PositiveIntegerField(default=0)
+    precio_compra = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal("0.00"))]
+    )
+    fecha_ingreso = models.DateTimeField(auto_now_add=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "lote"
+        verbose_name = "Lote"
+        verbose_name_plural = "Lotes"
+        ordering = ['fecha_ingreso']
+
+    def __str__(self):
+        return f"Lote {self.id} - {self.producto.nombre} - {self.cantidad_disponible} unidades"
+
+    def actualizar_stock_inventario(self):
+        try:
+            inventario = self.producto.inventario
+            inventario.save()
+        except Inventario.DoesNotExist:
+            pass
+
+    @classmethod
+    def consumir_fifo(cls, producto, cantidad_a_vender):
+        """
+        Implementa FIFO - Primero en entrar, primero en salir.
+        Descuenta la cantidad de los lotes más antiguos.
+        Retorna el costo total calculado basándose en los lotes consumidos.
+        """
+        from django.db.models import Sum
+        
+        lotes = cls.objects.filter(
+            producto=producto,
+            activo=True,
+            cantidad_disponible__gt=0
+        ).order_by('fecha_ingreso')
+        
+        total_disponible = sum(l.cantidad_disponible for l in lotes)
+        
+        if total_disponible < cantidad_a_vender:
+            raise ValueError(
+                f"Stock insuficiente. Disponible: {total_disponible}, Solicitado: {cantidad_a_vender}"
+            )
+        
+        cantidad_restante = cantidad_a_vender
+        costo_total = Decimal("0.00")
+        
+        for lote in lotes:
+            if cantidad_restante <= 0:
+                break
+            
+            if lote.cantidad_disponible >= cantidad_restante:
+                lote.cantidad_disponible -= cantidad_restante
+                costo_total += lote.precio_compra * cantidad_restante
+                cantidad_restante = 0
+            else:
+                cantidad_restante -= lote.cantidad_disponible
+                costo_total += lote.precio_compra * lote.cantidad_disponible
+                lote.cantidad_disponible = 0
+            
+            lote.save()
+        
+        producto.inventario.save()
+        
+        return costo_total
+
 
 # =======================================
 # SERVICIOS
@@ -1048,53 +1132,64 @@ class RepuestoMantenimiento(TimestampedModel):
 
     def _actualizar_stock(self, tipo_movimiento):
         """
-        Actualiza el stock del producto y crea el movimiento de inventario.
+        Actualiza el stock del producto usando FIFO y crea el movimiento de inventario.
 
         Args:
             tipo_movimiento: 'salida' para reducir, 'entrada' para restaurar
         """
         try:
-            inventario = self.producto.inventario
-
             if tipo_movimiento == "salida":
-                # Reducir stock
-                stock_anterior = inventario.stock_actual
-                inventario.stock_actual = max(
-                    0, inventario.stock_actual - self.cantidad
-                )
-                inventario.save(update_fields=["stock_actual"])
-
-                # Determinar motivo
-                if inventario.stock_actual < self.cantidad:
-                    motivo = (
-                        f"Mantenimiento #{self.mantenimiento_id} - Stock insuficiente"
-                    )
-                else:
+                # Usar FIFO para reducir stock
+                try:
+                    costo = Lote.consumir_fifo(self.producto, self.cantidad)
+                    motivo = f"Mantenimiento #{self.mantenimiento_id} - FIFO (costo: {costo})"
+                except ValueError as e:
+                    # Stock insuficiente
+                    motivo = f"Mantenimiento #{self.mantenimiento_id} - Stock insuficiente"
+                except Exception as e:
                     motivo = f"Mantenimiento #{self.mantenimiento_id}"
-
-            else:  # entrada
-                # Restaurar stock
-                inventario.stock_actual += self.cantidad
-                inventario.save(update_fields=["stock_actual"])
-                motivo = f"Cancelación mantenimiento #{self.mantenimiento_id}"
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Error en _actualizar_stock (salida): {e}")
+            else:
+                # Restaurar stock - crear lote de devolución
+                try:
+                    lote, created = Lote.objects.get_or_create(
+                        producto=self.producto,
+                        activo=True,
+                        defaults={
+                            'cantidad_disponible': self.cantidad,
+                            'precio_compra': self.precio_unitario,
+                        }
+                    )
+                    if not created:
+                        lote.cantidad_disponible += self.cantidad
+                        lote.save()
+                    motivo = f"Cancelación mantenimiento #{self.mantenimiento_id}"
+                except Exception as e:
+                    motivo = f"Cancelación mantenimiento #{self.mantenimiento_id}"
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Error en _actualizar_stock (entrada): {e}")
 
             # Crear movimiento de inventario
-            InventarioMovimiento.objects.create(
-                inventario=inventario,
-                tipo=tipo_movimiento,
-                cantidad=self.cantidad,
-                motivo=motivo,
-                usuario=getattr(self.mantenimiento, "creado_por", None),
-            )
+            try:
+                inventario = self.producto.inventario
+                InventarioMovimiento.objects.create(
+                    inventario=inventario,
+                    tipo=tipo_movimiento,
+                    cantidad=self.cantidad,
+                    motivo=motivo,
+                    usuario=getattr(self.mantenimiento, "creado_por", None),
+                )
+            except Inventario.DoesNotExist:
+                pass
 
-        except Inventario.DoesNotExist:
-            # Si no existe inventario, registrar en logs
+        except Exception as e:
             import logging
-
             logger = logging.getLogger(__name__)
             logger.warning(
-                f"No se encontró inventario para el producto {self.producto_id} "
-                f"al {'agregar' if tipo_movimiento == 'salida' else 'eliminar'} repuesto"
+                f"Error en _actualizar_stock para producto {self.producto_id}: {e}"
             )
 
     def delete(self, *args, **kwargs):
@@ -1209,57 +1304,76 @@ class DetalleVenta(models.Model):
         super().save(*args, **kwargs)
 
     def descontar_stock(self):
-        """Descuenta el stock cuando se confirma el pago"""
+        """Descuenta el stock usando método FIFO cuando se confirma el pago"""
         try:
-            inventario = self.producto.inventario
-            if inventario.stock_actual >= self.cantidad:
-                inventario.stock_actual -= self.cantidad
-                inventario.save(update_fields=["stock_actual"])
-
-                # Crear movimiento de inventario
+            costo = Lote.consumir_fifo(self.producto, self.cantidad)
+            
+            # Crear movimiento de inventario
+            try:
+                inventario = self.producto.inventario
                 InventarioMovimiento.objects.create(
                     inventario=inventario,
                     tipo="salida",
                     cantidad=self.cantidad,
-                    motivo=f"Venta #{self.venta.id} - Pago confirmado",
+                    motivo=f"Venta #{self.venta.id} - FIFO (costo: {costo})",
                     usuario=getattr(self.venta, "registrado_por", None),
                 )
-                return True
-            else:
-                # Si no hay suficiente stock, registrar el problema pero permitir la venta
-                InventarioMovimiento.objects.create(
-                    inventario=inventario,
-                    tipo="salida",
-                    cantidad=self.cantidad,
-                    motivo=f"Venta #{self.venta.id} - Stock insuficiente al pagar",
-                    usuario=getattr(self.venta, "registrado_por", None),
-                )
-                inventario.stock_actual = max(
-                    0, inventario.stock_actual - self.cantidad
-                )
-                inventario.save(update_fields=["stock_actual"])
-                return False
-        except Inventario.DoesNotExist:
-            # Si no existe inventario para el producto, no hacer nada
+            except Inventario.DoesNotExist:
+                pass
+            
             return True
+        except ValueError as e:
+            # Stock insuficiente
+            try:
+                inventario = self.producto.inventario
+                InventarioMovimiento.objects.create(
+                    inventario=inventario,
+                    tipo="salida",
+                    cantidad=self.cantidad,
+                    motivo=f"Venta #{self.venta.id} - Stock insuficiente",
+                    usuario=getattr(self.venta, "registrado_por", None),
+                )
+            except Inventario.DoesNotExist:
+                pass
+            return False
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error en descontar_stock FIFO: {e}")
+            return False
 
     def restaurar_stock(self):
-        """Restaura el stock cuando se cancela una venta pagada"""
+        """Restaura el stock cuando se cancela una venta pagada - crea un lote de devolución"""
         try:
-            inventario = self.producto.inventario
-            inventario.stock_actual += self.cantidad
-            inventario.save(update_fields=["stock_actual"])
-
-            # Crear movimiento de inventario
-            InventarioMovimiento.objects.create(
-                inventario=inventario,
-                tipo="entrada",
-                cantidad=self.cantidad,
-                motivo=f"Cancelación venta #{self.venta.id}",
-                usuario=getattr(self.venta, "registrado_por", None),
+            # Crear un lote especial para la devolución (con precio de venta como referencia)
+            lote, created = Lote.objects.get_or_create(
+                producto=self.producto,
+                activo=True,
+                defaults={
+                    'cantidad_disponible': self.cantidad,
+                    'precio_compra': self.precio_unitario,  # Usar precio de venta como referencia
+                }
             )
-        except Inventario.DoesNotExist:
-            pass
+            if not created:
+                lote.cantidad_disponible += self.cantidad
+                lote.save()
+            
+            # Crear movimiento de inventario
+            try:
+                inventario = self.producto.inventario
+                InventarioMovimiento.objects.create(
+                    inventario=inventario,
+                    tipo="entrada",
+                    cantidad=self.cantidad,
+                    motivo=f"Cancelación venta #{self.venta.id}",
+                    usuario=getattr(self.venta, "registrado_por", None),
+                )
+            except Inventario.DoesNotExist:
+                pass
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error en restaurar_stock: {e}")
 
     def delete(self, *args, **kwargs):
         # Solo restaurar stock si la venta estaba pagada
@@ -1352,6 +1466,16 @@ class Inventario(TimestampedModel):
 
     def __str__(self):
         return f"{self.producto.nombre} - Stock: {self.stock_actual}"
+
+    def save(self, *args, **kwargs):
+        if self.producto_id:
+            from django.db.models import Sum
+            result = Lote.objects.filter(
+                producto=self.producto, 
+                activo=True
+            ).aggregate(total=Sum('cantidad_disponible'))
+            self.stock_actual = result['total'] or 0
+        super().save(*args, **kwargs)
 
 
 class InventarioMovimiento(TimestampedModel):

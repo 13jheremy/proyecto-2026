@@ -2984,5 +2984,59 @@ class RecordatorioMantenimientoSerializer(serializers.ModelSerializer):
 
 
 # =======================================
+# LOTES - INVENTARIO POR LOTES (FIFO)
+# =======================================
+class LoteSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_categoria = serializers.CharField(source="producto.categoria.nombre", read_only=True)
+
+    class Meta:
+        model = Lote
+        fields = [
+            "id",
+            "producto",
+            "producto_nombre",
+            "producto_categoria",
+            "cantidad_disponible",
+            "precio_compra",
+            "fecha_ingreso",
+            "activo",
+        ]
+        read_only_fields = ["fecha_ingreso"]
+
+    def validate_cantidad_disponible(self, value):
+        if value is None or value < 0:
+            raise serializers.ValidationError("La cantidad debe ser mayor o igual a 0")
+        return value
+
+    def validate_precio_compra(self, value):
+        if value is None or value < 0:
+            raise serializers.ValidationError("El precio de compra debe ser mayor o igual a 0")
+        return value
+
+
+class LoteCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lote
+        fields = [
+            "producto",
+            "cantidad_disponible",
+            "precio_compra",
+            "activo",
+        ]
+
+    def create(self, validated_data):
+        lote = super().create(validated_data)
+        lote.actualizar_stock_inventario()
+        return lote
+
+    def update(self, instance, validated_data):
+        old_cantidad = instance.cantidad_disponible
+        instance = super().update(instance, validated_data)
+        instance.actualizar_stock_inventario()
+        return instance
+
+
+# =======================================
 # VENTAS - PRECIOS ESPECIALES POR CLIENTE
 # =======================================

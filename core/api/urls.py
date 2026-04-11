@@ -82,6 +82,7 @@ router.register(
     RepuestoMantenimientoViewSet,
     basename="repuesto-mantenimiento",
 )
+router.register(r"lotes", LoteViewSet, basename="lote")
 
 # =======================================
 # PRECIOS ESPECIALES POR CLIENTE

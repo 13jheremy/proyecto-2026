@@ -3681,6 +3681,7 @@ class ProductoViewSet(BaseViewSet):
         # Extraer campos de stock del validated_data
         stock_inicial = serializer.validated_data.pop("stock_inicial", 0)
         stock_minimo = serializer.validated_data.pop("stock_minimo", 0)
+        precio_compra = serializer.validated_data.get("precio_compra", 0)
 
         # Establecer el usuario que crea el registro
         usuario_actual = (
@@ -3690,29 +3691,29 @@ class ProductoViewSet(BaseViewSet):
         # Crear el producto con el usuario creador
         producto = serializer.save(creado_por=usuario_actual)
 
-        # Crear inventario con stock inicial
+        # Crear inventario (el stock se calculará desde los lotes)
         inventario, created = Inventario.objects.get_or_create(
             producto=producto,
             defaults={
-                "stock_actual": stock_inicial,
+                "stock_actual": 0,
                 "stock_minimo": stock_minimo,
                 "creado_por": usuario_actual,
             },
         )
 
-        # Crear movimiento de inventario si hay stock inicial
+        # Si hay stock inicial, crear un Lote (FIFO)
         if stock_inicial > 0:
-            InventarioMovimiento.objects.create(
-                inventario=inventario,
-                tipo="entrada",
-                cantidad=stock_inicial,
-                motivo=f"Stock inicial del producto {producto.nombre}",
-                usuario=usuario_actual,
+            Lote.objects.create(
+                producto=producto,
+                cantidad_disponible=stock_inicial,
+                precio_compra=precio_compra,
+                activo=True,
                 creado_por=usuario_actual,
             )
+            # El save del Lote actualiza el stock del inventario automáticamente
 
         logger.info(
-            f"Producto {producto.id} creado con inventario automático por usuario {usuario_actual}. Stock inicial: {stock_inicial}, Stock mínimo: {stock_minimo}"
+            f"Producto {producto.id} creado con lote automático por usuario {usuario_actual}. Stock inicial: {stock_inicial}, Precio compra: {precio_compra}"
         )
 
     def perform_update(self, serializer):
@@ -6053,6 +6054,78 @@ class InventarioMovimientoViewSet(BaseViewSet):
             self.request.user if self.request.user.is_authenticated else None
         )
         serializer.save(usuario=usuario_actual, creado_por=usuario_actual)
+
+
+class LoteViewSet(BaseViewSet):
+    """ViewSet para gestionar Lotes de inventario (FIFO)"""
+
+    queryset = Lote.objects.select_related(
+        "producto",
+        "producto__categoria",
+        "creado_por__persona_asociada",
+        "actualizado_por__persona_asociada",
+    ).all()
+    serializer_class = LoteSerializer
+    search_fields = ["producto__nombre"]
+    filterset_fields = ["producto", "activo"]
+    ordering = ["-fecha_ingreso"]
+
+    def get_permissions(self):
+        return [CustomPermission()]
+
+    def get_serializer_class(self):
+        if self.action in ["create", "update", "partial_update"]:
+            return LoteCreateSerializer
+        return LoteSerializer
+
+    def perform_create(self, serializer):
+        lote = serializer.save()
+        lote.actualizar_stock_inventario()
+        logger.info(f"Lote ID {lote.id} creado para producto {lote.producto.nombre}")
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        instance.actualizar_stock_inventario()
+        logger.info(f"Lote ID {instance.id} actualizado")
+
+    @action(detail=False, methods=["get"])
+    def por_producto(self, request):
+        """Obtener lotes de un producto específico"""
+        producto_id = request.query_params.get("producto_id")
+        if not producto_id:
+            return Response(
+                {"error": "Se requiere producto_id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        lotes = self.queryset.filter(producto_id=producto_id, activo=True).order_by("fecha_ingreso")
+        serializer = self.get_serializer(lotes, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        """Estadísticas de lotes"""
+        try:
+            total_lotes = Lote.objects.filter(activo=True).count()
+            total_stock = Lote.objects.filter(activo=True).aggregate(
+                total=Sum("cantidad_disponible")
+            )["total"] or 0
+            
+            productos_con_lotes = Lote.objects.filter(
+                activo=True, cantidad_disponible__gt=0
+            ).values("producto").distinct().count()
+
+            return Response({
+                "total_lotes": total_lotes,
+                "total_stock": total_stock,
+                "productos_con_lotes": productos_con_lotes,
+            })
+        except Exception as e:
+            logger.error(f"Error en lotes stats: {e}")
+            return Response(
+                {"error": "Error al obtener estadísticas"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 # =======================================
