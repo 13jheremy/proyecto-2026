@@ -383,6 +383,42 @@ class Lote(TimestampedModel):
         except Inventario.DoesNotExist:
             pass
 
+    def save(self, *args, **kwargs):
+        """
+        Validación para prevenir ediciones inappropriately del lote.
+        
+        REGLAS:
+        - CREAR nuevo lote: Para nuevas compras (siempre permitido)
+        - EDITAR lote: Solo para correcciones (error de digitación)
+        - NO permitido editar para simular nuevas compras
+        
+        El sistema prioriza la trazabilidad: cada cambio real = nuevo lote
+        """
+        from django.utils import timezone
+        
+        # Si es un lote existente y se está editando
+        if self.pk:
+            self_updated = Lote.objects_all.filter(pk=self.pk).first()
+            if self_updated:
+                # Verificar si cambió quantity_disponible o precio_compra (这两种 = nueva compra)
+                # Solo permitir edición si es corrección menor
+                if (self.cantidad_disponible != self_updated.cantidad_disponible or 
+                    self.precio_compra != self_updated.precio_compra):
+                    # Verificar que no esté trying to add stock incorrectly
+                    # Permitido solo si decrease (corrección de error)
+                    if self.cantidad_disponible > self_updated.cantidad_disponible:
+                        # Trying to add stock via edit = NO PERMITIDO
+                        raise ValueError(
+                            "No puedes agregar stock editando un lote existente. "
+                            "Para nuevas compras, CREA un nuevo lote. "
+                            "El sistema prioriza la trazabilidad: cada cambio real = nuevo lote."
+                        )
+        
+        super().save(*args, **kwargs)
+        
+        # Actualizar inventario
+        self.actualizar_stock_inventario()
+
     @classmethod
     def consumir_fifo(cls, producto, cantidad_a_vender):
         """
