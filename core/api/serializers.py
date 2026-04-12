@@ -883,6 +883,17 @@ class CategoriaSerializer(BaseModelSerializer):
     def get_productos_count(self, obj):
         return obj.producto_set.filter(activo=True, eliminado=False).count()
 
+    def validate_nombre(self, value):
+        if not value:
+            return value
+        normalized = Categoria.normalizar_nombre(value)
+        existing = Categoria.objects.filter(nombre_normalizado=normalized)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError("Ya existe una categoría con este nombre.")
+        return value
+
     def get_creado_por_nombre(self, obj):
         if obj.creado_por:
             if hasattr(obj.creado_por, "persona") and obj.creado_por.persona:
@@ -939,6 +950,17 @@ class CategoriaServicioSerializer(BaseModelSerializer):
 
     def get_servicios_count(self, obj):
         return obj.servicio_set.filter(activo=True, eliminado=False).count()
+
+    def validate_nombre(self, value):
+        if not value:
+            return value
+        normalized = CategoriaServicio.normalizar_nombre(value)
+        existing = CategoriaServicio.objects.filter(nombre_normalizado=normalized)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError("Ya existe una categoría de servicio con este nombre.")
+        return value
 
     def get_creado_por_nombre(self, obj):
         if obj.creado_por:

@@ -267,7 +267,8 @@ class UsuarioRol(TimestampedModel):
 # CATEGORÍAS
 # =======================================
 class Categoria(TimestampedModel):
-    nombre = models.CharField(max_length=100, unique=True)
+    nombre = models.CharField(max_length=100)
+    nombre_normalizado = models.CharField(max_length=100, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     activo = models.BooleanField(default=True)
 
@@ -279,9 +280,31 @@ class Categoria(TimestampedModel):
     def __str__(self):
         return self.nombre
 
+    def clean(self):
+        super().clean()
+        if self.nombre:
+            normalized = self.normalizar_nombre(self.nombre)
+            existing = Categoria.objects.filter(nombre_normalizado=normalized)
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            if existing.exists():
+                raise ValidationError({'nombre': 'Ya existe una categoría con ese nombre.'})
+
+    def save(self, *args, **kwargs):
+        if self.nombre:
+            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalizar_nombre(texto):
+        if not texto:
+            return ''
+        return ' '.join(texto.strip().lower().split())
+
 
 class CategoriaServicio(TimestampedModel):
-    nombre = models.CharField(max_length=100, unique=True)
+    nombre = models.CharField(max_length=100)
+    nombre_normalizado = models.CharField(max_length=100, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     activo = models.BooleanField(default=True)
 
@@ -292,6 +315,27 @@ class CategoriaServicio(TimestampedModel):
 
     def __str__(self):
         return self.nombre
+
+    def clean(self):
+        super().clean()
+        if self.nombre:
+            normalized = self.normalizar_nombre(self.nombre)
+            existing = CategoriaServicio.objects.filter(nombre_normalizado=normalized)
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            if existing.exists():
+                raise ValidationError({'nombre': 'Ya existe una categoría de servicio con ese nombre.'})
+
+    def save(self, *args, **kwargs):
+        if self.nombre:
+            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalizar_nombre(texto):
+        if not texto:
+            return ''
+        return ' '.join(texto.strip().lower().split())
 
 
 # =======================================
