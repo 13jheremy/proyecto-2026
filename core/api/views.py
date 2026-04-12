@@ -3748,7 +3748,7 @@ class ProductoViewSet(BaseViewSet):
                 activo=True,
                 eliminado=False,
             )
-            .select_related("inventario")
+            .select_related("inventario", "categoria")
         )
 
         page = self.paginate_queryset(queryset)
@@ -5874,7 +5874,7 @@ class InventarioViewSet(BaseViewSet):
     ).all()
     serializer_class = InventarioSerializer
     search_fields = ["producto__nombre"]
-    filterset_fields = ["producto", "stock_actual", "stock_minimo"]
+    filterset_fields = ["producto", "stock_actual", "stock_minimo", "producto__eliminado"]
     ordering = ["-fecha_registro"]
 
     def get_permissions(self):
@@ -5891,6 +5891,18 @@ class InventarioViewSet(BaseViewSet):
         instance = self.get_object()
         logger.info(f"Iniciando actualización de inventario ID: {instance.id}")
         logger.info(f"Datos recibidos: {request.data}")
+
+        # Validar que no se pueda aumentar el stock manualmente (solo se permite disminuir)
+        nuevo_stock = request.data.get('stock_actual')
+        if nuevo_stock is not None and nuevo_stock > instance.stock_actual:
+            logger.warning(f"Intento de aumentar stock manualmente: {instance.stock_actual} -> {nuevo_stock}")
+            return Response(
+                {
+                    "error": "No se puede aumentar el stock manualmente. Solo se permite disminuir el stock mediante ventas o consumos.",
+                    "details": {"stock_actual": "El stock solo puede disminuir, no aumentar manualmente."}
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Validar datos de entrada
         serializer = self.get_serializer(
