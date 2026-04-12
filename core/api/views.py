@@ -5874,8 +5874,21 @@ class InventarioViewSet(BaseViewSet):
     ).all()
     serializer_class = InventarioSerializer
     search_fields = ["producto__nombre"]
-    filterset_fields = ["producto", "stock_actual", "stock_minimo", "producto__eliminado"]
+    filterset_fields = ["producto", "stock_actual", "stock_minimo", "stock_bajo"]
     ordering = ["-fecha_registro"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filtrar por stock_bajo si se proporciona
+        stock_bajo = self.request.query_params.get('stock_bajo')
+        if stock_bajo is not None:
+            if stock_bajo.lower() == 'true':
+                queryset = queryset.filter(stock_actual__lte=F('stock_minimo'))
+            elif stock_bajo.lower() == 'false':
+                queryset = queryset.filter(stock_actual__gt=F('stock_minimo'))
+        
+        return queryset
 
     def get_permissions(self):
         """
