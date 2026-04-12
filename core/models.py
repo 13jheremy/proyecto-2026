@@ -469,6 +469,7 @@ class Lote(TimestampedModel):
 # =======================================
 class Servicio(TimestampedModel):
     nombre = models.CharField(max_length=200)
+    nombre_normalizado = models.CharField(max_length=200, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     categoria_servicio = models.ForeignKey(CategoriaServicio, on_delete=models.CASCADE)
     precio = models.DecimalField(
@@ -484,6 +485,28 @@ class Servicio(TimestampedModel):
 
     def __str__(self):
         return self.nombre
+
+    def clean(self):
+        super().clean()
+        if self.nombre:
+            normalized = self.normalizar_nombre(self.nombre)
+            # Verificar duplicado excluyendo el registro actual
+            existing = Servicio.objects.filter(nombre_normalizado=normalized)
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            if existing.exists():
+                raise ValidationError({'nombre': 'Ya existe un servicio con ese nombre.'})
+
+    def save(self, *args, **kwargs):
+        if self.nombre:
+            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalizar_nombre(texto):
+        if not texto:
+            return ''
+        return ' '.join(texto.strip().lower().split())
 
 
 # =======================================

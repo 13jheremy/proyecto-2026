@@ -1278,6 +1278,20 @@ class ServicioSerializer(BaseModelSerializer):
             "eliminado_por",
         ]
 
+    def validate_nombre(self, value):
+        """Valida que no exista un servicio con nombre similar (ignora mayúsculas/minúsculas)"""
+        normalized = Servicio.normalizar_nombre(value)
+        queryset = Servicio.objects.filter(nombre_normalizado=normalized)
+        
+        # Excluir el registro actual en actualización
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        
+        if queryset.exists():
+            raise serializers.ValidationError("Ya existe un servicio con ese nombre.")
+        
+        return value
+
     def get_creado_por(self, obj):
         if obj.creado_por:
             user = obj.creado_por
