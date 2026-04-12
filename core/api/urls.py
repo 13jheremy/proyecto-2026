@@ -204,6 +204,9 @@ urlpatterns = [
     path("reportes/motos/", reporte_motos, name="reporte_motos"),
     path("reportes/proveedores/", reporte_proveedores, name="reporte_proveedores"),
     path("reportes/usuarios/", reporte_usuarios, name="reporte_usuarios"),
+    path("reportes/ventas/detalle/", reporte_ventas_detalle, name="reporte_ventas_detalle"),
+    path("reportes/inventario/detalle/", reporte_inventario_detalle, name="reporte_inventario_detalle"),
+    path("reportes/clientes/", reporte_ventas_por_cliente, name="reporte_ventas_por_cliente"),
     # =======================================
     # BÚSQUEDA
     # =======================================

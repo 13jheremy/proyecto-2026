@@ -6494,6 +6494,342 @@ def reporte_usuarios(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def reporte_ventas_detalle(request):
+    """Reporte detallado de ventas con productos por cada venta"""
+    if not (
+        IsEmpleado().has_permission(request, None)
+        or IsAdministrador().has_permission(request, None)
+    ):
+        return Response(
+            {"detail": "No tienes permiso para generar reportes de ventas."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        fecha_inicio = request.GET.get("fecha_inicio")
+        fecha_fin = request.GET.get("fecha_fin")
+        cliente_id = request.GET.get("cliente_id")
+        producto_id = request.GET.get("producto_id")
+
+        if not fecha_inicio or not fecha_fin:
+            return Response(
+                {"error": "Se requieren fecha_inicio y fecha_fin"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Query base con selects optimizados
+        ventas_qs = Venta.objects.filter(
+            fecha_venta__date__range=[fecha_inicio, fecha_fin],
+            eliminado=False
+        ).select_related(
+            'cliente',
+            'registrado_por'
+        ).prefetch_related(
+            'detalles__producto',
+            'detalles__producto__categoria'
+        )
+
+        # Aplicar filtros
+        if cliente_id:
+            ventas_qs = ventas_qs.filter(cliente_id=cliente_id)
+        
+        if producto_id:
+            ventas_qs = ventas_qs.filter(detalles__producto_id=producto_id).distinct()
+
+        # Calcular totales
+        total_ventas = ventas_qs.count()
+        total_ingresos = float(ventas_qs.aggregate(total=Sum("total"))["total"] or 0)
+        total_productos_vendidos = sum(
+            sum(d.cantidad for d in v.detalles.all()) 
+            for v in ventas_qs
+        )
+
+        # Obtener ventas con detalles
+        ventas_data = []
+        for venta in ventas_qs:
+            cliente = venta.cliente
+            usuario = venta.registrado_por
+            
+            detalles_data = []
+            for detalle in venta.detalles.all():
+                detalles_data.append({
+                    "producto_id": detalle.producto.id,
+                    "producto_nombre": detalle.producto.nombre,
+                    "categoria": detalle.producto.categoria.nombre if detalle.producto.categoria else None,
+                    "cantidad": detalle.cantidad,
+                    "precio_unitario": float(detalle.precio_unitario),
+                    "subtotal": float(detalle.subtotal),
+                })
+            
+            ventas_data.append({
+                "venta_id": venta.id,
+                "cliente": {
+                    "id": cliente.id,
+                    "nombre": f"{cliente.nombre} {cliente.apellido}",
+                    "cedula": cliente.cedula,
+                },
+                "usuario": {
+                    "id": usuario.id if usuario else None,
+                    "nombre": usuario.username if usuario else None,
+                } if usuario else None,
+                "fecha": venta.fecha_venta.strftime("%Y-%m-%d %H:%M:%S"),
+                "estado": venta.estado,
+                "subtotal": float(venta.subtotal),
+                "descuento": float(venta.descuento),
+                "impuesto": float(venta.impuesto),
+                "total": float(venta.total),
+                "notas": venta.notas or "",
+                "detalles": detalles_data,
+            })
+
+        reporte = {
+            "periodo": {"inicio": fecha_inicio, "fin": fecha_fin},
+            "filtros": {
+                "cliente_id": cliente_id,
+                "producto_id": producto_id,
+            },
+            "resumen": {
+                "total_ventas": total_ventas,
+                "total_ingresos": total_ingresos,
+                "total_productos": total_productos_vendidos,
+            },
+            "ventas": ventas_data,
+        }
+
+        return Response(reporte)
+    except Exception as e:
+        logger.error(f"Error en reporte_ventas_detalle: {str(e)}")
+        return Response(
+            {"error": "Error al generar reporte detallado de ventas"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def reporte_inventario_detalle(request):
+    """Reporte detallado de inventario con información de lotes"""
+    if not (
+        IsEmpleado().has_permission(request, None)
+        or IsAdministrador().has_permission(request, None)
+    ):
+        return Response(
+            {"detail": "No tienes permiso para generar reportes de inventario."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        producto_id = request.GET.get("producto_id")
+        incluir_lotes = request.GET.get("incluir_lotes", "true").lower() == "true"
+        stock_bajo = request.GET.get("stock_bajo", "false").lower() == "true"
+
+        productos_qs = Producto.objects.filter(
+            eliminado=False
+        ).select_related(
+            'categoria',
+            'proveedor'
+        )
+
+        if producto_id:
+            productos_qs = productos_qs.filter(id=producto_id)
+        
+        if stock_bajo:
+            productos_qs = productos_qs.annotate(
+                current_stock=Coalesce(F("inventario__stock_actual"), 0),
+                min_stock=Coalesce(F("inventario__stock_minimo"), 10),
+            ).filter(current_stock__lt=F("min_stock"))
+
+        productos_data = []
+        total_stock = 0
+        total_valor = 0
+
+        for producto in productos_qs:
+            try:
+                inventario = producto.inventario
+                stock = inventario.stock_actual or 0
+                stock_minimo = inventario.stock_minimo or 0
+            except Inventario.DoesNotExist:
+                stock = 0
+                stock_minimo = 0
+
+            # Obtener lotes si se requiere
+            lotes_data = []
+            if incluir_lotes:
+                lotes = producto.lotes.filter(activo=True).order_by('fecha_ingreso')
+                for lote in lotes:
+                    lotes_data.append({
+                        "lote_id": lote.id,
+                        "cantidad_disponible": lote.cantidad_disponible,
+                        "precio_compra": float(lote.precio_compra),
+                        "fecha_ingreso": lote.fecha_ingreso.strftime("%Y-%m-%d %H:%M:%S"),
+                        "valor_total": float(lote.cantidad_disponible * lote.precio_compra),
+                    })
+                valor_lotes = sum(l['valor_total'] for l in lotes_data)
+            else:
+                valor_lotes = float(stock * producto.precio_compra)
+
+            productos_data.append({
+                "producto_id": producto.id,
+                "nombre": producto.nombre,
+                "categoria": producto.categoria.nombre if producto.categoria else None,
+                "proveedor": producto.proveedor.nombre if producto.proveedor else None,
+                "precio_compra": float(producto.precio_compra),
+                "precio_venta": float(producto.precio_venta),
+                "stock_actual": stock,
+                "stock_minimo": stock_minimo,
+                "stock_bajo": stock < stock_minimo,
+                "valor_total": valor_lotes,
+                "lotes": lotes_data if incluir_lotes else [],
+                "activo": producto.activo,
+            })
+
+            total_stock += stock
+            total_valor += valor_lotes
+
+        reporte = {
+            "resumen": {
+                "total_productos": len(productos_data),
+                "total_stock": total_stock,
+                "valor_total_inventario": total_valor,
+                "productos_stock_bajo": sum(1 for p in productos_data if p['stock_bajo']),
+            },
+            "productos": productos_data,
+        }
+
+        return Response(reporte)
+    except Exception as e:
+        logger.error(f"Error en reporte_inventario_detalle: {str(e)}")
+        return Response(
+            {"error": "Error al generar reporte detallado de inventario"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def reporte_ventas_por_cliente(request):
+    """Reporte de ventas agrupado por cliente"""
+    if not (
+        IsEmpleado().has_permission(request, None)
+        or IsAdministrador().has_permission(request, None)
+    ):
+        return Response(
+            {"detail": "No tienes permiso para generar reportes de clientes."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        fecha_inicio = request.GET.get("fecha_inicio")
+        fecha_fin = request.GET.get("fecha_fin")
+        cliente_id = request.GET.get("cliente_id")
+        ordenar_por = request.GET.get("ordenar_por", "total")  # total | ventas | nombre
+
+        if not fecha_inicio or not fecha_fin:
+            return Response(
+                {"error": "Se requieren fecha_inicio y fecha_fin"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Query de ventas
+        ventas_qs = Venta.objects.filter(
+            fecha_venta__date__range=[fecha_inicio, fecha_fin],
+            eliminado=False
+        ).select_related('cliente').prefetch_related('detalles')
+
+        if cliente_id:
+            ventas_qs = ventas_qs.filter(cliente_id=cliente_id)
+
+        # Agrupar por cliente
+        from django.db.models import Avg, Max, Min
+        
+        clientes_data = {}
+        
+        for venta in ventas_qs:
+            cliente = venta.cliente
+            clave = cliente.id
+            
+            if clave not in clientes_data:
+                clientes_data[clave] = {
+                    "cliente_id": cliente.id,
+                    "nombre": f"{cliente.nombre} {cliente.apellido}",
+                    "cedula": cliente.cedula,
+                    "telefono": cliente.telefono or "",
+                    "direccion": cliente.direccion or "",
+                    "total_compras": 0,
+                    "cantidad_ventas": 0,
+                    "total_productos": 0,
+                    "promedio_por_venta": 0,
+                    "primera_compra": None,
+                    "ultima_compra": None,
+                    "ventas": [],
+                }
+            
+            clientes_data[clave]["total_compras"] += float(venta.total)
+            clientes_data[clave]["cantidad_ventas"] += 1
+            
+            detalles = list(venta.detalles.all())
+            clientes_data[clave]["total_productos"] += sum(d.cantidad for d in detalles)
+            
+            fecha_str = venta.fecha_venta.strftime("%Y-%m-%d %H:%M:%S")
+            
+            if not clientes_data[clave]["primera_compra"]:
+                clientes_data[clave]["primera_compra"] = fecha_str
+            else:
+                if venta.fecha_venta.strftime("%Y-%m-%d") < clientes_data[clave]["primera_compra"][:10]:
+                    clientes_data[clave]["primera_compra"] = fecha_str
+            
+            if not clientes_data[clave]["ultima_compra"]:
+                clientes_data[clave]["ultima_compra"] = fecha_str
+            else:
+                if venta.fecha_venta.strftime("%Y-%m-%d") > clientes_data[clave]["ultima_compra"][:10]:
+                    clientes_data[clave]["ultima_compra"] = fecha_str
+
+        # Convertir a lista y calcular promedios
+        clientes_list = list(clientes_data.values())
+        
+        for cliente in clientes_list:
+            cliente["promedio_por_venta"] = round(cliente["total_compras"] / cliente["cantidad_ventas"], 2) if cliente["cantidad_ventas"] > 0 else 0
+
+        # Ordenar
+        if ordenar_por == "ventas":
+            clientes_list.sort(key=lambda x: x["cantidad_ventas"], reverse=True)
+        elif ordenar_por == "nombre":
+            clientes_list.sort(key=lambda x: x["nombre"])
+        else:
+            clientes_list.sort(key=lambda x: x["total_compras"], reverse=True)
+
+        # Calcular totales generales
+        total_ventas = sum(c["cantidad_ventas"] for c in clientes_list)
+        total_ingresos = sum(c["total_compras"] for c in clientes_list)
+        total_productos = sum(c["total_productos"] for c in clientes_list)
+
+        reporte = {
+            "periodo": {"inicio": fecha_inicio, "fin": fecha_fin},
+            "filtros": {
+                "cliente_id": cliente_id,
+                "ordenar_por": ordenar_por,
+            },
+            "resumen": {
+                "total_clientes": len(clientes_list),
+                "total_ventas": total_ventas,
+                "total_ingresos": total_ingresos,
+                "total_productos": total_productos,
+                "promedio_por_cliente": round(total_ingresos / len(clientes_list), 2) if clientes_list else 0,
+            },
+            "clientes": clientes_list,
+        }
+
+        return Response(reporte)
+    except Exception as e:
+        logger.error(f"Error en reporte_ventas_por_cliente: {str(e)}")
+        return Response(
+            {"error": "Error al generar reporte de ventas por cliente"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
 @permission_classes([AllowAny])
 def health_check(request):
     """Health check endpoint"""
