@@ -299,6 +299,7 @@ class CategoriaServicio(TimestampedModel):
 # =======================================
 class Proveedor(TimestampedModel):
     nombre = models.CharField(max_length=200)
+    nombre_normalizado = models.CharField(max_length=200, unique=True, blank=True, editable=False)
     nit = models.CharField(max_length=50, unique=True, null=True, blank=True)
     telefono = models.CharField(max_length=20, blank=True)
     correo = models.EmailField(blank=True)
@@ -313,6 +314,27 @@ class Proveedor(TimestampedModel):
 
     def __str__(self):
         return self.nombre
+
+    def clean(self):
+        super().clean()
+        if self.nombre:
+            normalized = self.normalizar_nombre(self.nombre)
+            existing = Proveedor.objects.filter(nombre_normalizado=normalized)
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            if existing.exists():
+                raise ValidationError({'nombre': 'Ya existe un proveedor con ese nombre.'})
+
+    def save(self, *args, **kwargs):
+        if self.nombre:
+            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalizar_nombre(texto):
+        if not texto:
+            return ''
+        return ' '.join(texto.strip().lower().split())
 
 
 # =======================================

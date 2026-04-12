@@ -1013,6 +1013,21 @@ class ProveedorSerializer(BaseModelSerializer):
             raise serializers.ValidationError("Ya existe un proveedor con este NIT")
         return value
 
+    def validate_nombre(self, value):
+        """Validar unicidad del nombre normalizado"""
+        if not value:
+            return value
+
+        normalized = Proveedor.normalizar_nombre(value)
+
+        existing = Proveedor.objects.filter(nombre_normalizado=normalized)
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        
+        if existing.exists():
+            raise serializers.ValidationError("Ya existe un proveedor con este nombre.")
+        return value
+
     def get_creado_por(self, obj):
         if obj.creado_por:
             user = obj.creado_por
