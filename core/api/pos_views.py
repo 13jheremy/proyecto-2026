@@ -331,10 +331,16 @@ def buscar_productos_pos(request):
         filters = Q(eliminado=False, activo=True)
 
         if query:
-            filters &= (
-                Q(nombre__icontains=query)
-                | Q(descripcion__icontains=query)
-            )
+            # Determinar si es una búsqueda por ID (número) o texto
+            if query.isdigit():
+                # Búsqueda por ID exacto
+                filters &= Q(id=int(query))
+            else:
+                # Búsqueda por texto (nombre o descripción)
+                filters &= (
+                    Q(nombre__icontains=query)
+                    | Q(descripcion__icontains=query)
+                )
 
         if categoria_id:
             filters &= Q(categoria_id=categoria_id)
