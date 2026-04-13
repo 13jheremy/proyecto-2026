@@ -5881,7 +5881,7 @@ class InventarioViewSet(BaseViewSet):
     ).all()
     serializer_class = InventarioSerializer
     search_fields = ["producto__nombre"]
-    filterset_fields = ["producto", "stock_actual", "stock_minimo", "stock_bajo"]
+    filterset_fields = ["producto", "stock_actual", "stock_minimo"]
     ordering = ["-fecha_registro"]
 
     def get_queryset(self):
