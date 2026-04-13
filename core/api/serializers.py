@@ -1109,18 +1109,16 @@ class ProductoSerializer(BaseModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
     
-    # Convertir precio_compra a número para el frontend
-    precio_compra = serializers.SerializerMethodField()
+    # Campo precio_compra que acepta tanto lectura como escritura
+    precio_compra = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=True,
+        source="precio_compra"
+    )
 
     # Campos de auditoría
     creado_por = serializers.SerializerMethodField(read_only=True)
     actualizado_por = serializers.SerializerMethodField(read_only=True)
     eliminado_por = serializers.SerializerMethodField(read_only=True)
-
-    def get_precio_compra(self, obj):
-        if obj.precio_compra is not None:
-            return float(obj.precio_compra)
-        return 0
 
     # Campos para inventario inicial (solo en creación)
     stock_inicial = serializers.IntegerField(
