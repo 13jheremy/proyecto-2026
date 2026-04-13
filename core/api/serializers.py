@@ -1108,11 +1108,19 @@ class ProductoSerializer(BaseModelSerializer):
     categoria_nombre = serializers.CharField(source="categoria.nombre", read_only=True)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
+    
+    # Convertir precio_compra a número para el frontend
+    precio_compra = serializers.SerializerMethodField()
 
     # Campos de auditoría
     creado_por = serializers.SerializerMethodField(read_only=True)
     actualizado_por = serializers.SerializerMethodField(read_only=True)
     eliminado_por = serializers.SerializerMethodField(read_only=True)
+
+    def get_precio_compra(self, obj):
+        if obj.precio_compra is not None:
+            return float(obj.precio_compra)
+        return 0
 
     # Campos para inventario inicial (solo en creación)
     stock_inicial = serializers.IntegerField(
@@ -1562,8 +1570,6 @@ class DetalleMantenimientoSerializer(BaseModelSerializer):
             "eliminado",
             "fecha_registro",
             "fecha_actualizacion",
-            # Agregar campo servicio completo para Flutter
-            "servicio_data",
         ]
 
     def get_servicio_nombre(self, obj):
