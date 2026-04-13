@@ -3,18 +3,21 @@ from django.dispatch import receiver
 from ..models import *
 from datetime import timedelta
 from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
+logger.info("[SIGNALS] Módulo core.api.signals cargado correctamente")
 
 
 # ===== 1) Asignar rol a superusuario =====
 @receiver(post_save, sender=Usuario)
 def asignar_rol_superusuario(sender, instance, created, **kwargs):
+    logger.info(f"[SIGNAL USUARIO] Usuario creado: {instance.username}, is_superuser: {instance.is_superuser}")
     if created and instance.is_superuser:
         try:
             rol_admin, _ = Rol.objects.get_or_create(nombre="Administrador")
             UsuarioRol.objects.get_or_create(usuario=instance, rol=rol_admin)
         except Exception as e:
-            import logging
-
             logging.getLogger(__name__).error(
                 f"Error al asignar rol de administrador: {e}"
             )
@@ -23,26 +26,16 @@ def asignar_rol_superusuario(sender, instance, created, **kwargs):
 # ===== 2) Crear inventario y movimiento al crear producto =====
 @receiver(post_save, sender=Producto)
 def crear_inventario_y_movimiento_producto(sender, instance, created, **kwargs):
-    """
-    Crea automáticamente un inventario y un movimiento de entrada 
-    cuando se crea un nuevo producto.
-    """
+    logger.info(f"[SIGNAL PRODUCTO] Producto creado: {instance.nombre}, ID: {instance.id}")
     if created:
-        import logging
-        logger = logging.getLogger(__name__)
-        
         try:
-            # Crear inventario con stock 0
             inventario = Inventario.objects.create(
                 producto=instance,
                 stock_actual=0,
                 stock_minimo=0,
                 activo=True
             )
-            
-            # Crear movimiento de entrada (stock inicial 0 = sin movimiento de entrada)
-            # El movimiento se creará cuando se agregue stock via lote o inventario
-            logger.info(f"Inventario creado para producto {instance.nombre}")
+            logger.info(f"[SIGNAL PRODUCTO] Inventario creado para producto {instance.nombre}")
         except Exception as e:
             logger.error(f"Error al crear inventario para producto {instance.id}: {e}")
 
@@ -78,9 +71,12 @@ def crear_movimiento_entrada_lote(sender, instance, created, **kwargs):
     Crea un movimiento de entrada cuando se crea un nuevo lote,
     representando una compra/ingreso de inventario.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[DEBUG SIGNAL] Signal ejecutado para Lote - created={created}, cantidad={instance.cantidad_disponible}")
+    
     if created and instance.cantidad_disponible > 0:
-        import logging
-        logger = logging.getLogger(__name__)
+        logger.info(f"[SIGNAL LOTE] Nuevo lote creado: ID={instance.id}, Producto={instance.producto.nombre}, Cantidad={instance.cantidad_disponible}")
         
         try:
             inventario = instance.producto.inventario
@@ -91,11 +87,11 @@ def crear_movimiento_entrada_lote(sender, instance, created, **kwargs):
                 motivo=f"Ingreso de lote #{instance.id} - {instance.producto.nombre}",
                 usuario=instance.creado_por if hasattr(instance, 'creado_por') else None,
             )
-            logger.info(f"Movimiento de entrada creado para lote ID {instance.id} - Producto: {instance.producto.nombre}")
+            logger.info(f"[SIGNAL LOTE] Movimiento de entrada creado para lote ID {instance.id}")
         except Inventario.DoesNotExist:
-            logger.warning(f"No existe inventario para producto {instance.producto.nombre}, no se crea movimiento")
+            logger.error(f"[SIGNAL LOTE] No existe inventario para producto {instance.producto.nombre}")
         except Exception as e:
-            logger.error(f"Error al crear movimiento de entrada para lote {instance.id}: {e}")
+            logger.error(f"[SIGNAL LOTE] Error al crear movimiento de entrada para lote {instance.id}: {e}")
 
 
 # ===== 2) Crear datos iniciales =====
