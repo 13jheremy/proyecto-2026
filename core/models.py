@@ -328,17 +328,22 @@ class CategoriaServicio(TimestampedModel):
     def clean(self):
         super().clean()
         if self.nombre:
-            sin_espacios = self.quitar_espacios(self.nombre)
-            existing = CategoriaServicio.objects.filter(nombre_sin_espacios=sin_espacios)
+            clave = self.quitar_espacios(self.nombre)
+            if not clave:
+                raise ValidationError({'nombre': 'El nombre no puede estar vacío después de normalizar.'})
+            existing = CategoriaServicio.objects.filter(nombre_sin_espacios=clave)
             if self.pk:
                 existing = existing.exclude(pk=self.pk)
             if existing.exists():
                 raise ValidationError({'nombre': 'Ya existe una categoría de servicio con ese nombre.'})
 
     def save(self, *args, **kwargs):
-        if self.nombre:
-            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
-            self.nombre_sin_espacios = self.quitar_espacios(self.nombre)
+        if not self.nombre:
+            return
+        self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+        self.nombre_sin_espacios = self.quitar_espacios(self.nombre)
+        if not self.nombre_sin_espacios:
+            return
         super().save(*args, **kwargs)
 
     @staticmethod
@@ -352,27 +357,6 @@ class CategoriaServicio(TimestampedModel):
         if not texto:
             return ''
         return ''.join(texto.lower().split())
-
-    def clean(self):
-        super().clean()
-        if self.nombre:
-            normalized = self.normalizar_nombre(self.nombre)
-            existing = CategoriaServicio.objects.filter(nombre_normalizado=normalized)
-            if self.pk:
-                existing = existing.exclude(pk=self.pk)
-            if existing.exists():
-                raise ValidationError({'nombre': 'Ya existe una categoría de servicio con ese nombre.'})
-
-    def save(self, *args, **kwargs):
-        if self.nombre:
-            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
-        super().save(*args, **kwargs)
-
-    @staticmethod
-    def normalizar_nombre(texto):
-        if not texto:
-            return ''
-        return ' '.join(texto.strip().lower().split())
 
 
 # =======================================

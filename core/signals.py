@@ -38,7 +38,7 @@ def crear_datos_iniciales(sender, **kwargs):
         "Revisión general de la moto",
         "Arreglo del motor",
         "Reparación de sistema eléctrico (luces, batería, encendido)",
-        "Frenos (cambio y ajuste de pastillas, discos o tambor)",
+        "Frenos (cambio y ajuste de pastillas, discos o trombagit)",
         "Suspensión y dirección (amortiguadores, horquillas)",
         "Cambio y reparación de llantas (neumáticos y cámaras)",
         "Instalación de accesorios (portaequipajes, luces extra, baúles)",
@@ -46,7 +46,12 @@ def crear_datos_iniciales(sender, **kwargs):
         "Lavado y limpieza completa",
     ]
     for nombre in categorias_servicio:
-        CategoriaServicio.objects.get_or_create(nombre=nombre)
+        clave = CategoriaServicio.quitar_espacios(nombre)
+        if not clave:
+            continue
+        obj = CategoriaServicio.objects.filter(nombre_sin_espacios=clave).first()
+        if not obj:
+            CategoriaServicio.objects.create(nombre=nombre)
     # Debug prints removed
 
     # Categorías de productos (tercero)
