@@ -677,6 +677,9 @@ class Mantenimiento(TimestampedModel):
         max_length=20, choices=ESTADO_CHOICES, default="pendiente"
     )
     kilometraje_ingreso = models.PositiveIntegerField()
+    kilometraje_salida = models.PositiveIntegerField(
+        blank=True, null=True, help_text="Kilometraje al salir la moto después del mantenimiento"
+    )
 
     # Campos nuevos: tipo y prioridad
     tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default="correctivo")
