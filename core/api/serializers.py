@@ -1109,10 +1109,8 @@ class ProductoSerializer(BaseModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     imagen_url = serializers.SerializerMethodField()
     
-    # Campo precio_compra que acepta tanto lectura como escritura
     precio_compra = serializers.DecimalField(
-        max_digits=10, decimal_places=2, required=True,
-        source="precio_compra"
+        max_digits=10, decimal_places=2, required=True
     )
 
     # Campos de auditoría
