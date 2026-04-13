@@ -269,6 +269,7 @@ class UsuarioRol(TimestampedModel):
 class Categoria(TimestampedModel):
     nombre = models.CharField(max_length=100)
     nombre_normalizado = models.CharField(max_length=100, unique=True, blank=True, editable=False)
+    nombre_sin_espacios = models.CharField(max_length=100, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     activo = models.BooleanField(default=True)
 
@@ -283,8 +284,8 @@ class Categoria(TimestampedModel):
     def clean(self):
         super().clean()
         if self.nombre:
-            normalized = self.normalizar_nombre(self.nombre)
-            existing = Categoria.objects.filter(nombre_normalizado=normalized)
+            sin_espacios = self.quitar_espacios(self.nombre)
+            existing = Categoria.objects.filter(nombre_sin_espacios=sin_espacios)
             if self.pk:
                 existing = existing.exclude(pk=self.pk)
             if existing.exists():
@@ -293,6 +294,7 @@ class Categoria(TimestampedModel):
     def save(self, *args, **kwargs):
         if self.nombre:
             self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+            self.nombre_sin_espacios = self.quitar_espacios(self.nombre)
         super().save(*args, **kwargs)
 
     @staticmethod
@@ -301,10 +303,17 @@ class Categoria(TimestampedModel):
             return ''
         return ' '.join(texto.strip().lower().split())
 
+    @staticmethod
+    def quitar_espacios(texto):
+        if not texto:
+            return ''
+        return ''.join(texto.lower().split())
+
 
 class CategoriaServicio(TimestampedModel):
     nombre = models.CharField(max_length=100)
     nombre_normalizado = models.CharField(max_length=100, unique=True, blank=True, editable=False)
+    nombre_sin_espacios = models.CharField(max_length=100, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     activo = models.BooleanField(default=True)
 
@@ -315,6 +324,34 @@ class CategoriaServicio(TimestampedModel):
 
     def __str__(self):
         return self.nombre
+
+    def clean(self):
+        super().clean()
+        if self.nombre:
+            sin_espacios = self.quitar_espacios(self.nombre)
+            existing = CategoriaServicio.objects.filter(nombre_sin_espacios=sin_espacios)
+            if self.pk:
+                existing = existing.exclude(pk=self.pk)
+            if existing.exists():
+                raise ValidationError({'nombre': 'Ya existe una categoría de servicio con ese nombre.'})
+
+    def save(self, *args, **kwargs):
+        if self.nombre:
+            self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+            self.nombre_sin_espacios = self.quitar_espacios(self.nombre)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalizar_nombre(texto):
+        if not texto:
+            return ''
+        return ' '.join(texto.strip().lower().split())
+
+    @staticmethod
+    def quitar_espacios(texto):
+        if not texto:
+            return ''
+        return ''.join(texto.lower().split())
 
     def clean(self):
         super().clean()
@@ -536,6 +573,7 @@ class Lote(TimestampedModel):
 class Servicio(TimestampedModel):
     nombre = models.CharField(max_length=200)
     nombre_normalizado = models.CharField(max_length=200, unique=True, blank=True, editable=False)
+    nombre_sin_espacios = models.CharField(max_length=200, unique=True, blank=True, editable=False)
     descripcion = models.TextField(blank=True)
     categoria_servicio = models.ForeignKey(CategoriaServicio, on_delete=models.CASCADE)
     precio = models.DecimalField(
@@ -555,9 +593,8 @@ class Servicio(TimestampedModel):
     def clean(self):
         super().clean()
         if self.nombre:
-            normalized = self.normalizar_nombre(self.nombre)
-            # Verificar duplicado excluyendo el registro actual
-            existing = Servicio.objects.filter(nombre_normalizado=normalized)
+            sin_espacios = self.quitar_espacios(self.nombre)
+            existing = Servicio.objects.filter(nombre_sin_espacios=sin_espacios)
             if self.pk:
                 existing = existing.exclude(pk=self.pk)
             if existing.exists():
@@ -566,6 +603,7 @@ class Servicio(TimestampedModel):
     def save(self, *args, **kwargs):
         if self.nombre:
             self.nombre_normalizado = self.normalizar_nombre(self.nombre)
+            self.nombre_sin_espacios = self.quitar_espacios(self.nombre)
         super().save(*args, **kwargs)
 
     @staticmethod
@@ -573,6 +611,12 @@ class Servicio(TimestampedModel):
         if not texto:
             return ''
         return ' '.join(texto.strip().lower().split())
+
+    @staticmethod
+    def quitar_espacios(texto):
+        if not texto:
+            return ''
+        return ''.join(texto.lower().split())
 
 
 # =======================================

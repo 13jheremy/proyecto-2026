@@ -886,8 +886,8 @@ class CategoriaSerializer(BaseModelSerializer):
     def validate_nombre(self, value):
         if not value:
             return value
-        normalized = Categoria.normalizar_nombre(value)
-        existing = Categoria.objects.filter(nombre_normalizado=normalized)
+        sin_espacios = Categoria.quitar_espacios(value)
+        existing = Categoria.objects.filter(nombre_sin_espacios=sin_espacios)
         if self.instance:
             existing = existing.exclude(pk=self.instance.pk)
         if existing.exists():
@@ -954,8 +954,8 @@ class CategoriaServicioSerializer(BaseModelSerializer):
     def validate_nombre(self, value):
         if not value:
             return value
-        normalized = CategoriaServicio.normalizar_nombre(value)
-        existing = CategoriaServicio.objects.filter(nombre_normalizado=normalized)
+        sin_espacios = CategoriaServicio.quitar_espacios(value)
+        existing = CategoriaServicio.objects.filter(nombre_sin_espacios=sin_espacios)
         if self.instance:
             existing = existing.exclude(pk=self.instance.pk)
         if existing.exists():
@@ -1316,9 +1316,9 @@ class ServicioSerializer(BaseModelSerializer):
         ]
 
     def validate_nombre(self, value):
-        """Valida que no exista un servicio con nombre similar (ignora mayúsculas/minúsculas)"""
-        normalized = Servicio.normalizar_nombre(value)
-        queryset = Servicio.objects.filter(nombre_normalizado=normalized)
+        """Valida que no exista un servicio con nombre similar (ignora mayúsculas/minúsculas y espacios)"""
+        sin_espacios = Servicio.quitar_espacios(value)
+        queryset = Servicio.objects.filter(nombre_sin_espacios=sin_espacios)
         
         # Excluir el registro actual en actualización
         if self.instance:
