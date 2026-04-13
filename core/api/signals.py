@@ -20,6 +20,84 @@ def asignar_rol_superusuario(sender, instance, created, **kwargs):
             )
 
 
+# ===== 2) Crear inventario y movimiento al crear producto =====
+@receiver(post_save, sender=Producto)
+def crear_inventario_y_movimiento_producto(sender, instance, created, **kwargs):
+    """
+    Crea automáticamente un inventario y un movimiento de entrada 
+    cuando se crea un nuevo producto.
+    """
+    if created:
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Crear inventario con stock 0
+            inventario = Inventario.objects.create(
+                producto=instance,
+                stock_actual=0,
+                stock_minimo=0,
+                activo=True
+            )
+            
+            # Crear movimiento de entrada (stock inicial 0 = sin movimiento de entrada)
+            # El movimiento se creará cuando se agregue stock via lote o inventario
+            logger.info(f"Inventario creado para producto {instance.nombre}")
+        except Exception as e:
+            logger.error(f"Error al crear inventario para producto {instance.id}: {e}")
+
+
+# ===== 2) Crear movimiento de inventario al crear inventario =====
+@receiver(post_save, sender=Inventario)
+def crear_movimiento_entrada_inventario(sender, instance, created, **kwargs):
+    """
+    Crea un movimiento de entrada cuando se crea un nuevo inventario
+    con stock inicial mayor a 0.
+    """
+    if created and instance.stock_actual > 0:
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            InventarioMovimiento.objects.create(
+                inventario=instance,
+                tipo="entrada",
+                cantidad=instance.stock_actual,
+                motivo=f"Inicialización de inventario para {instance.producto.nombre}",
+                usuario=instance.creado_por if hasattr(instance, 'creado_por') else None,
+            )
+            logger.info(f"Movimiento de entrada creado para inventario ID {instance.id} - Producto: {instance.producto.nombre}")
+        except Exception as e:
+            logger.error(f"Error al crear movimiento de entrada para inventario {instance.id}: {e}")
+
+
+# ===== 3) Crear movimiento de entrada al crear lote =====
+@receiver(post_save, sender=Lote)
+def crear_movimiento_entrada_lote(sender, instance, created, **kwargs):
+    """
+    Crea un movimiento de entrada cuando se crea un nuevo lote,
+    representando una compra/ingreso de inventario.
+    """
+    if created and instance.cantidad_disponible > 0:
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            inventario = instance.producto.inventario
+            InventarioMovimiento.objects.create(
+                inventario=inventario,
+                tipo="entrada",
+                cantidad=instance.cantidad_disponible,
+                motivo=f"Ingreso de lote #{instance.id} - {instance.producto.nombre}",
+                usuario=instance.creado_por if hasattr(instance, 'creado_por') else None,
+            )
+            logger.info(f"Movimiento de entrada creado para lote ID {instance.id} - Producto: {instance.producto.nombre}")
+        except Inventario.DoesNotExist:
+            logger.warning(f"No existe inventario para producto {instance.producto.nombre}, no se crea movimiento")
+        except Exception as e:
+            logger.error(f"Error al crear movimiento de entrada para lote {instance.id}: {e}")
+
+
 # ===== 2) Crear datos iniciales =====
 @receiver(post_migrate)
 def crear_datos_iniciales(sender, **kwargs):
