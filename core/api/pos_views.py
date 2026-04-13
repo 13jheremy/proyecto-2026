@@ -403,6 +403,7 @@ def buscar_productos_pos(request):
 def buscar_clientes_pos(request):
     """
     Búsqueda de clientes para POS
+    Solo retorna personas que tienen el rol de 'cliente'
     """
     try:
         query = request.GET.get("q", "").strip()
@@ -410,14 +411,16 @@ def buscar_clientes_pos(request):
         if not query:
             return Response({"results": []})
 
-        # Buscar personas (clientes)
+        # Buscar personas (clientes) que tienen el rol de 'cliente'
         personas = Persona.objects.filter(
             Q(nombre__icontains=query)
             | Q(apellido__icontains=query)
             | Q(cedula__icontains=query)
             | Q(telefono__icontains=query),
             eliminado=False,
-        )[:10]
+            usuario__roles__rol__nombre__iexact="cliente",
+            usuario__roles__activo=True,
+        ).distinct()[:10]
 
         results = []
         for persona in personas:

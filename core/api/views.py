@@ -2535,6 +2535,7 @@ class PersonaViewSet(viewsets.ModelViewSet):
         cedula = self.request.query_params.get("cedula", None)
         con_usuario = self.request.query_params.get("con_usuario", None)
         sin_usuario = self.request.query_params.get("sin_usuario", None)
+        solo_clientes = self.request.query_params.get("solo_clientes", None)
 
         if cedula:
             queryset = queryset.filter(cedula__icontains=cedula)
@@ -2542,6 +2543,12 @@ class PersonaViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(usuario__isnull=False)
         if sin_usuario == "true":
             queryset = queryset.filter(usuario__isnull=True)
+        # Nuevo filtro para solo mostrar clientes (personas con rol de cliente)
+        if solo_clientes == "true":
+            queryset = queryset.filter(
+                usuario__roles__rol__nombre__iexact="cliente",
+                usuario__roles__activo=True
+            ).distinct()
 
         return queryset
 
