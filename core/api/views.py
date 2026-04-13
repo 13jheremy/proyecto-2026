@@ -6451,6 +6451,143 @@ def reporte_mantenimientos(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def reporte_mantenimientos_detalle(request):
+    """Reporte detallado de mantenimientos con filtros por moto, cliente, estado, etc."""
+    if not (
+        IsEmpleado().has_permission(request, None)
+        or IsAdministrador().has_permission(request, None)
+    ):
+        return Response(
+            {"detail": "No tienes permiso para generar reportes de mantenimientos."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        fecha_inicio = request.GET.get("fecha_inicio")
+        fecha_fin = request.GET.get("fecha_fin")
+        moto_id = request.GET.get("moto_id")
+        cliente_id = request.GET.get("cliente_id")
+        estado = request.GET.get("estado")
+        tecnico_id = request.GET.get("tecnico_id")
+
+        # Base queryset
+        mantenimientos_qs = Mantenimiento.objects.filter(
+            eliminado=False
+        ).select_related(
+            'moto__propietario',
+            'tecnico_asignado',
+            'completado_por',
+            'creado_por'
+        ).prefetch_related(
+            'detalles__servicio',
+            'repuestos__producto'
+        )
+
+        # Apply filters
+        if fecha_inicio and fecha_fin:
+            mantenimientos_qs = mantenimientos_qs.filter(
+                fecha_ingreso__date__range=[fecha_inicio, fecha_fin]
+            )
+
+        if moto_id:
+            mantenimientos_qs = mantenimientos_qs.filter(moto_id=moto_id)
+
+        if cliente_id:
+            mantenimientos_qs = mantenimientos_qs.filter(moto__propietario_id=cliente_id)
+
+        if estado:
+            mantenimientos_qs = mantenimientos_qs.filter(estado=estado)
+
+        if tecnico_id:
+            mantenimientos_qs = mantenimientos_qs.filter(tecnico_asignado_id=tecnico_id)
+
+        # Calculate totals
+        total_mantenimientos = mantenimientos_qs.count()
+        total_ingresos = float(mantenimientos_qs.aggregate(total=Sum("total"))["total"] or 0)
+
+        # Count by state
+        por_estado = mantenimientos_qs.values("estado").annotate(total=Count("id")).order_by("-total")
+
+        # Get mantenimientos data
+        mantenimientos_data = []
+        for mantenimiento in mantenimientos_qs:
+            moto = mantenimiento.moto
+            propietario = moto.propietario if moto else None
+            tecnico = mantenimiento.tecnico_asignado
+
+            # Get servicios
+            servicios_data = []
+            for detalle in mantenimiento.detalles.all():
+                servicios_data.append({
+                    "id": detalle.id,
+                    "servicio": detalle.servicio.nombre if detalle.servicio else "Servicio eliminado",
+                    "precio": str(detalle.precio),
+                    "observaciones": detalle.observaciones or "",
+                })
+
+            # Get repuestos
+            repuestos_data = []
+            for repuesto in mantenimiento.repuestos.all():
+                repuestos_data.append({
+                    "id": repuesto.id,
+                    "producto": repuesto.producto.nombre if repuesto.producto else "Producto eliminado",
+                    "cantidad": repuesto.cantidad,
+                    "precio_unitario": str(repuesto.precio_unitario),
+                    "subtotal": str(repuesto.subtotal),
+                })
+
+            mantenimientos_data.append({
+                "id": mantenimiento.id,
+                "moto": {
+                    "id": moto.id if moto else None,
+                    "placa": moto.placa if moto else "",
+                    "marca": moto.marca if moto else "",
+                    "modelo": moto.modelo if moto else "",
+                },
+                "propietario": {
+                    "id": propietario.id if propietario else None,
+                    "nombre": propietario.nombre_completo if propietario else "",
+                    "cedula": propietario.cedula if propietario else "",
+                } if propietario else None,
+                "tecnico": {
+                    "id": tecnico.id if tecnico else None,
+                    "nombre": tecnico.username if tecnico else "",
+                } if tecnico else None,
+                "fecha_ingreso": mantenimiento.fecha_ingreso.isoformat() if mantenimiento.fecha_ingreso else None,
+                "fecha_entrega": mantenimiento.fecha_entrega.isoformat() if mantenimiento.fecha_entrega else None,
+                "estado": mantenimiento.estado,
+                "tipo": mantenimiento.tipo,
+                "prioridad": mantenimiento.prioridad,
+                "descripcion_problema": mantenimiento.descripcion_problema,
+                "diagnostico": mantenimiento.diagnostico or "",
+                "kilometraje_ingreso": mantenimiento.kilometraje_ingreso,
+                "kilometraje_salida": mantenimiento.kilometraje_salida,
+                "servicios": servicios_data,
+                "repuestos": repuestos_data,
+                "costo_adicional": str(mantenimiento.costo_adicional),
+                "total": str(mantenimiento.total),
+                "creado_por": mantenimiento.creado_por.username if mantenimiento.creado_por else "",
+            })
+
+        return Response({
+            "mantenimientos": mantenimientos_data,
+            "resumen": {
+                "total_mantenimientos": total_mantenimientos,
+                "total_ingresos": total_ingresos,
+                "por_estado": list(por_estado),
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Error en reporte_mantenimientos_detalle: {str(e)}")
+        return Response(
+            {"error": f"Error al generar reporte: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def reporte_motos(request):
     """Reporte de motos por marca y año"""
     if not (

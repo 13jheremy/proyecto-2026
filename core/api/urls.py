@@ -201,6 +201,11 @@ urlpatterns = [
         reporte_mantenimientos,
         name="reporte_mantenimientos",
     ),
+    path(
+        "reportes/mantenimientos/detalle/",
+        reporte_mantenimientos_detalle,
+        name="reporte_mantenimientos_detalle",
+    ),
     path("reportes/motos/", reporte_motos, name="reporte_motos"),
     path("reportes/proveedores/", reporte_proveedores, name="reporte_proveedores"),
     path("reportes/usuarios/", reporte_usuarios, name="reporte_usuarios"),
