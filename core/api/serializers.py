@@ -2881,6 +2881,23 @@ class InventarioMovimientoSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(
         source="inventario.producto.nombre", read_only=True
     )
+    usuario = serializers.SerializerMethodField(read_only=True)
+
+    def get_usuario(self, obj):
+        if obj.usuario:
+            user = obj.usuario
+            if hasattr(user, "persona_asociada") and user.persona_asociada:
+                return {
+                    "id": user.id,
+                    "nombre": user.persona_asociada.nombre_completo,
+                    "correo": user.correo_electronico,
+                }
+            return {
+                "id": user.id,
+                "nombre": user.username,
+                "correo": user.correo_electronico,
+            }
+        return None
 
     # Campos de auditoría
     creado_por = serializers.SerializerMethodField(read_only=True)
