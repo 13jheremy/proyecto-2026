@@ -5906,6 +5906,20 @@ class InventarioViewSet(BaseViewSet):
         """
         return [CustomPermission()]
 
+    def perform_create(self, serializer):
+        inventario = serializer.save()
+        
+        # Crear movimiento de inventario (entrada) cuando se crea inventario manualmente
+        if inventario.stock_actual > 0:
+            InventarioMovimiento.objects.create(
+                inventario=inventario,
+                tipo="entrada",
+                cantidad=inventario.stock_actual,
+                motivo=f"Inicialización de inventario para {inventario.producto.nombre}",
+                usuario=inventario.creado_por if hasattr(inventario, 'creado_por') else None,
+            )
+            logger.info(f"Inventario ID {inventario.id} creado con movimiento de entrada para producto {inventario.producto.nombre}")
+
     def update(self, request, *args, **kwargs):
         """Actualizar un registro de inventario con logging detallado."""
         instance = self.get_object()
@@ -6113,6 +6127,20 @@ class LoteViewSet(BaseViewSet):
     def perform_create(self, serializer):
         lote = serializer.save()
         lote.actualizar_stock_inventario()
+        
+        # Crear movimiento de inventario (entrada) para registrar la compra
+        try:
+            inventario = lote.producto.inventario
+            InventarioMovimiento.objects.create(
+                inventario=inventario,
+                tipo="entrada",
+                cantidad=lote.cantidad_disponible,
+                motivo=f"Ingreso de lote #{lote.id} - {lote.producto.nombre}",
+                usuario=lote.creado_por if hasattr(lote, 'creado_por') else None,
+            )
+        except Inventario.DoesNotExist:
+            logger.warning(f"No se encontró inventario para crear movimiento de entrada - Producto: {lote.producto.nombre}")
+        
         logger.info(f"Lote ID {lote.id} creado para producto {lote.producto.nombre}")
 
     def perform_update(self, serializer):
